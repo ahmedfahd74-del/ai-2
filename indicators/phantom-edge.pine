@@ -1,0 +1,847 @@
+// ============================================================================
+// PHANTOM EDGE - Unified 3-Layer Trading System
+// ============================================================================
+// A comprehensive Pine Script v6 indicator that merges multi-timeframe
+// trading logic into a single 3-layer system:
+//   Layer 1 (WHERE): HTF Bias from 1W/1D/4H pivot-based market structure
+//   Layer 2 (WHEN):  LTF Alignment scanning 2H/1H/30M/15M structure
+//   Layer 3 (HOW):   Entry execution with S/R zones, liquidity, and signals
+//
+// Features:
+//   - Non-repainting signals using barstate.isconfirmed
+//   - Anti-repaint MTF data via barmerge.lookahead_off
+//   - Full visual map with zones, levels, and trade markers
+//   - Real-time dashboard with system state
+//   - JSON-formatted alert messages for automation
+//
+// Version: 1.0
+// ============================================================================
+
+//@version=6
+indicator('Phantom Edge', overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// --- User Defined Types ---
+
+type ZoneInfo
+    float priceHigh
+    float priceLow
+    int direction        // 1 = bullish, -1 = bearish
+    int strength         // number of touches
+    int birthBar
+    box boxRef = na
+
+type TradeState
+    float entry = na
+    float sl = na
+    float tp1 = na
+    float tp2 = na
+    float tp3 = na
+    string status = "Idle"  // Idle, Sweep Detected, Confirmed, Entry Active
+    int direction = 0       // 1 = long, -1 = short
+    int signalBar = na
+
+
+// --- Input Group 1: HTF Bias ---
+
+string GRP_HTF = "1. HTF Bias"
+int htfPivotLen = input.int(5, "Pivot Length", minval = 2, maxval = 50, group = GRP_HTF)
+bool useWeekly = input.bool(true, "Use Weekly (1W)", group = GRP_HTF)
+bool useDaily = input.bool(true, "Use Daily (1D)", group = GRP_HTF)
+bool use4H = input.bool(true, "Use 4H", group = GRP_HTF)
+
+
+// --- Input Group 2: LTF Alignment ---
+
+string GRP_LTF = "2. LTF Alignment"
+int ltfPivotLen = input.int(3, "LTF Pivot Length", minval = 2, maxval = 20, group = GRP_LTF)
+bool use2H = input.bool(true, "Use 2H", group = GRP_LTF)
+bool use1H = input.bool(true, "Use 1H", group = GRP_LTF)
+bool use30M = input.bool(true, "Use 30M", group = GRP_LTF)
+bool use15M = input.bool(true, "Use 15M", group = GRP_LTF)
+
+// --- Input Group 3: Zones & Levels ---
+
+string GRP_ZONES = "3. Zones & Levels"
+float zoneAtrMult = input.float(0.5, "Zone ATR Multiplier", minval = 0.1, maxval = 3.0, step = 0.1, group = GRP_ZONES)
+int maxZones = input.int(10, "Max Zones Displayed", minval = 1, maxval = 50, group = GRP_ZONES)
+float zoneMergeDist = input.float(0.5, "Zone Merge Distance (ATR)", minval = 0.1, maxval = 2.0, step = 0.1, group = GRP_ZONES)
+bool showPDHL = input.bool(true, "Show PDH/PDL", group = GRP_ZONES)
+bool showPWHL = input.bool(true, "Show PWH/PWL", group = GRP_ZONES)
+int srPivotLen = input.int(10, "S/R Pivot Length", minval = 3, maxval = 50, group = GRP_ZONES)
+
+// --- Input Group 4: Entry Logic ---
+
+string GRP_ENTRY = "4. Entry Logic"
+float sweepWickPct = input.float(0.6, "Sweep Wick % Threshold", minval = 0.1, maxval = 1.0, step = 0.1, group = GRP_ENTRY)
+int cisdWindow = input.int(5, "CISD Confirmation Window (bars)", minval = 1, maxval = 20, group = GRP_ENTRY)
+float displacementMult = input.float(1.5, "Displacement Body Multiplier", minval = 1.0, maxval = 5.0, step = 0.1, group = GRP_ENTRY)
+bool useFVG = input.bool(true, "Detect FVG (Fair Value Gaps)", group = GRP_ENTRY)
+
+
+// --- Input Group 5: Risk & Targets ---
+
+string GRP_RISK = "5. Risk & Targets"
+float tp1RR = input.float(1.5, "TP1 Risk:Reward", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
+float tp2RR = input.float(3.0, "TP2 Risk:Reward", minval = 1.0, maxval = 20.0, step = 0.5, group = GRP_RISK)
+bool useTP3Daily = input.bool(true, "TP3: Opposing Daily Level", group = GRP_RISK)
+
+
+// --- Input Group 6: Kill Zones ---
+
+string GRP_KZ = "6. Kill Zones"
+bool useKillZones = input.bool(true, "Filter by Kill Zones", group = GRP_KZ)
+int londonStartHour = input.int(2, "London Start Hour", minval = 0, maxval = 23, group = GRP_KZ)
+int londonEndHour = input.int(5, "London End Hour", minval = 0, maxval = 23, group = GRP_KZ)
+int nyStartHour = input.int(7, "NY Start Hour", minval = 0, maxval = 23, group = GRP_KZ)
+int nyEndHour = input.int(10, "NY End Hour", minval = 0, maxval = 23, group = GRP_KZ)
+string kzTimezone = input.string("America/New_York", "Timezone", options = ["America/New_York", "Europe/London", "UTC"], group = GRP_KZ)
+
+
+// --- Input Group 7: Visuals ---
+
+string GRP_VIS = "7. Visuals"
+color bullColor = input.color(color.new(color.green, 0), "Bullish Color", group = GRP_VIS)
+color bearColor = input.color(color.new(color.red, 0), "Bearish Color", group = GRP_VIS)
+color pdhPdlColor = input.color(color.new(color.yellow, 0), "PDH/PDL Color", group = GRP_VIS)
+color pwhPwlColor = input.color(color.new(color.blue, 0), "PWH/PWL Color", group = GRP_VIS)
+int lineWidth = input.int(1, "Line Width", minval = 1, maxval = 4, group = GRP_VIS)
+bool showLayer1 = input.bool(true, "Show Layer 1 (HTF Bias)", group = GRP_VIS)
+bool showLayer2 = input.bool(true, "Show Layer 2 (LTF Alignment)", group = GRP_VIS)
+bool showLayer3 = input.bool(true, "Show Layer 3 (Zones/Entries)", group = GRP_VIS)
+bool showFVG = input.bool(true, "Show FVG Boxes", group = GRP_VIS)
+bool showLiquidity = input.bool(true, "Show Liquidity Pools", group = GRP_VIS)
+
+// --- Input Group 8: Dashboard ---
+
+string GRP_DASH = "8. Dashboard"
+bool showDashboard = input.bool(true, "Show Dashboard", group = GRP_DASH)
+string dashPosition = input.string("Top Right", "Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = GRP_DASH)
+string dashSize = input.string("Normal", "Size", options = ["Small", "Normal", "Large"], group = GRP_DASH)
+
+// --- Input Group 9: Alerts ---
+
+string GRP_ALERTS = "9. Alerts"
+bool alertBiasChange = input.bool(true, "Alert: HTF Bias Changed", group = GRP_ALERTS)
+bool alertLTFAligned = input.bool(true, "Alert: LTF Aligned", group = GRP_ALERTS)
+bool alertSweep = input.bool(true, "Alert: Sweep Detected", group = GRP_ALERTS)
+bool alertEntry = input.bool(true, "Alert: Entry Signal", group = GRP_ALERTS)
+
+
+// --- Constants ---
+
+int BULLISH = 1
+int BEARISH = -1
+int RANGING = 0
+float EQH_EQL_TOLERANCE = 0.001  // 0.1% tolerance for equal highs/lows
+
+// --- Persistent State Variables ---
+
+var TradeState tradeState = TradeState.new()
+var ZoneInfo[] srZones = array.new<ZoneInfo>()
+var line[] zoneLines = array.new<line>()
+var box[] zoneBoxes = array.new<box>()
+var box[] fvgBoxes = array.new<box>()
+var line linePDH = na
+var line linePDL = na
+var line linePWH = na
+var line linePWL = na
+var line lineEntry = na
+var line lineSL = na
+var line lineTP1 = na
+var int prevHtfBias = 0
+var bool prevLtfReady = false
+
+// --- Helper Functions ---
+
+// Get ATR value for zone thickness calculation
+atrVal = ta.atr(14)
+
+// Determine pivot-based trend from security data
+detectTrend(float ph, float pl, float prevPH, float prevPL) =>
+    int result = RANGING
+    if not na(ph) and not na(pl) and not na(prevPH) and not na(prevPL)
+        bool higherHigh = ph > prevPH
+        bool higherLow = pl > prevPL
+        bool lowerHigh = ph < prevPH
+        bool lowerLow = pl < prevPL
+        if higherHigh and higherLow
+            result := BULLISH
+        else if lowerHigh and lowerLow
+            result := BEARISH
+    result
+
+// Kill zone check
+isInKillZone() =>
+    bool result = true
+    if useKillZones
+        int currentHour = hour(time, kzTimezone)
+        bool inLondon = currentHour >= londonStartHour and currentHour < londonEndHour
+        bool inNY = currentHour >= nyStartHour and currentHour < nyEndHour
+        result := inLondon or inNY
+    result
+
+
+// --- Layer 1: HTF Bias (WHERE) ---
+
+// Pivot detection function for security context
+pivotHigh(int len) =>
+    ta.pivothigh(high, len, len)
+
+pivotLow(int len) =>
+    ta.pivotlow(low, len, len)
+
+// Weekly pivot data
+[wPH, wPL] = request.security(syminfo.tickerid, "W", [pivotHigh(htfPivotLen), pivotLow(htfPivotLen)], lookahead = barmerge.lookahead_off)
+
+// Daily pivot data
+[dPH, dPL] = request.security(syminfo.tickerid, "D", [pivotHigh(htfPivotLen), pivotLow(htfPivotLen)], lookahead = barmerge.lookahead_off)
+
+// 4H pivot data
+[h4PH, h4PL] = request.security(syminfo.tickerid, "240", [pivotHigh(htfPivotLen), pivotLow(htfPivotLen)], lookahead = barmerge.lookahead_off)
+
+// Track current and previous pivots for trend detection using var
+var float currentWPH = na
+var float currentWPL = na
+var float currentDPH = na
+var float currentDPL = na
+var float current4HPH = na
+var float current4HPL = na
+var float prevWPH = na
+var float prevWPL = na
+var float prevDPH = na
+var float prevDPL = na
+var float prev4HPH = na
+var float prev4HPL = na
+
+// Update previous pivots when new ones form (shift old current into prev, then update current)
+if not na(wPH) and wPH != currentWPH
+    prevWPH := currentWPH
+    currentWPH := wPH
+if not na(wPL) and wPL != currentWPL
+    prevWPL := currentWPL
+    currentWPL := wPL
+if not na(dPH) and dPH != currentDPH
+    prevDPH := currentDPH
+    currentDPH := dPH
+if not na(dPL) and dPL != currentDPL
+    prevDPL := currentDPL
+    currentDPL := dPL
+if not na(h4PH) and h4PH != current4HPH
+    prev4HPH := current4HPH
+    current4HPH := h4PH
+if not na(h4PL) and h4PL != current4HPL
+    prev4HPL := current4HPL
+    current4HPL := h4PL
+
+// Determine trend for each HTF
+int weeklyTrend = useWeekly ? detectTrend(currentWPH, currentWPL, prevWPH, prevWPL) : RANGING
+int dailyTrend = useDaily ? detectTrend(currentDPH, currentDPL, prevDPH, prevDPL) : RANGING
+int h4Trend = use4H ? detectTrend(current4HPH, current4HPL, prev4HPH, prev4HPL) : RANGING
+
+// 2-of-3 consensus for HTF bias
+int bullCount = (weeklyTrend == BULLISH ? 1 : 0) + (dailyTrend == BULLISH ? 1 : 0) + (h4Trend == BULLISH ? 1 : 0)
+int bearCount = (weeklyTrend == BEARISH ? 1 : 0) + (dailyTrend == BEARISH ? 1 : 0) + (h4Trend == BEARISH ? 1 : 0)
+
+int htfBias = bullCount >= 2 ? BULLISH : bearCount >= 2 ? BEARISH : RANGING
+
+// Premium/Discount zones from daily range
+[dailyHigh, dailyLow] = request.security(syminfo.tickerid, "D", [high, low], lookahead = barmerge.lookahead_off)
+float dailyMid = nz((dailyHigh + dailyLow) / 2.0)
+bool inPremium = close > dailyMid
+bool inDiscount = close < dailyMid
+
+
+// --- Layer 2: LTF Alignment (WHEN) ---
+
+// 2H pivot data
+[ltf2hPH, ltf2hPL] = request.security(syminfo.tickerid, "120", [pivotHigh(ltfPivotLen), pivotLow(ltfPivotLen)], lookahead = barmerge.lookahead_off)
+
+// 1H pivot data
+[ltf1hPH, ltf1hPL] = request.security(syminfo.tickerid, "60", [pivotHigh(ltfPivotLen), pivotLow(ltfPivotLen)], lookahead = barmerge.lookahead_off)
+
+// 30M pivot data
+[ltf30mPH, ltf30mPL] = request.security(syminfo.tickerid, "30", [pivotHigh(ltfPivotLen), pivotLow(ltfPivotLen)], lookahead = barmerge.lookahead_off)
+
+// 15M pivot data
+[ltf15mPH, ltf15mPL] = request.security(syminfo.tickerid, "15", [pivotHigh(ltfPivotLen), pivotLow(ltfPivotLen)], lookahead = barmerge.lookahead_off)
+
+// Track current and previous LTF pivots
+var float currentLtf2hPH = na
+var float currentLtf2hPL = na
+var float currentLtf1hPH = na
+var float currentLtf1hPL = na
+var float currentLtf30mPH = na
+var float currentLtf30mPL = na
+var float currentLtf15mPH = na
+var float currentLtf15mPL = na
+var float prevLtf2hPH = na
+var float prevLtf2hPL = na
+var float prevLtf1hPH = na
+var float prevLtf1hPL = na
+var float prevLtf30mPH = na
+var float prevLtf30mPL = na
+var float prevLtf15mPH = na
+var float prevLtf15mPL = na
+
+if not na(ltf2hPH) and ltf2hPH != currentLtf2hPH
+    prevLtf2hPH := currentLtf2hPH
+    currentLtf2hPH := ltf2hPH
+if not na(ltf2hPL) and ltf2hPL != currentLtf2hPL
+    prevLtf2hPL := currentLtf2hPL
+    currentLtf2hPL := ltf2hPL
+if not na(ltf1hPH) and ltf1hPH != currentLtf1hPH
+    prevLtf1hPH := currentLtf1hPH
+    currentLtf1hPH := ltf1hPH
+if not na(ltf1hPL) and ltf1hPL != currentLtf1hPL
+    prevLtf1hPL := currentLtf1hPL
+    currentLtf1hPL := ltf1hPL
+if not na(ltf30mPH) and ltf30mPH != currentLtf30mPH
+    prevLtf30mPH := currentLtf30mPH
+    currentLtf30mPH := ltf30mPH
+if not na(ltf30mPL) and ltf30mPL != currentLtf30mPL
+    prevLtf30mPL := currentLtf30mPL
+    currentLtf30mPL := ltf30mPL
+if not na(ltf15mPH) and ltf15mPH != currentLtf15mPH
+    prevLtf15mPH := currentLtf15mPH
+    currentLtf15mPH := ltf15mPH
+if not na(ltf15mPL) and ltf15mPL != currentLtf15mPL
+    prevLtf15mPL := currentLtf15mPL
+    currentLtf15mPL := ltf15mPL
+
+// Determine LTF trends
+int ltf2hTrend = use2H ? detectTrend(currentLtf2hPH, currentLtf2hPL, prevLtf2hPH, prevLtf2hPL) : RANGING
+int ltf1hTrend = use1H ? detectTrend(currentLtf1hPH, currentLtf1hPL, prevLtf1hPH, prevLtf1hPL) : RANGING
+int ltf30mTrend = use30M ? detectTrend(currentLtf30mPH, currentLtf30mPL, prevLtf30mPH, prevLtf30mPL) : RANGING
+int ltf15mTrend = use15M ? detectTrend(currentLtf15mPH, currentLtf15mPL, prevLtf15mPH, prevLtf15mPL) : RANGING
+
+// Check alignment with HTF bias
+int ltfAlignCount = 0
+int ltfActiveCount = 0
+
+if use2H
+    ltfActiveCount += 1
+    if ltf2hTrend == htfBias
+        ltfAlignCount += 1
+
+if use1H
+    ltfActiveCount += 1
+    if ltf1hTrend == htfBias
+        ltfAlignCount += 1
+
+if use30M
+    ltfActiveCount += 1
+    if ltf30mTrend == htfBias
+        ltfAlignCount += 1
+
+if use15M
+    ltfActiveCount += 1
+    if ltf15mTrend == htfBias
+        ltfAlignCount += 1
+
+// LTF alignment status
+bool ltfReady = ltfActiveCount > 0 ? ltfAlignCount >= math.ceil(ltfActiveCount / 2.0) : false
+string ltfStatus = ltfReady ? "Ready" : "Wait"
+
+
+// --- Layer 3: Entry Execution (HOW) ---
+
+// --- S/R Zone Detection ---
+
+float srPivotH = ta.pivothigh(high, srPivotLen, srPivotLen)
+float srPivotL = ta.pivotlow(low, srPivotLen, srPivotLen)
+
+// Zone thickness based on ATR
+float zoneThickness = nz(atrVal) * zoneAtrMult
+
+// Add new resistance zone when pivot high detected
+if not na(srPivotH) and showLayer3
+    float zHigh = srPivotH + zoneThickness / 2.0
+    float zLow = srPivotH - zoneThickness / 2.0
+    // Check if we should merge with existing zone
+    bool merged = false
+    if array.size(srZones) > 0
+        for i = 0 to array.size(srZones) - 1
+            ZoneInfo existingZone = array.get(srZones, i)
+            if math.abs(existingZone.priceHigh - zHigh) < nz(atrVal) * zoneMergeDist
+                existingZone.strength += 1
+                merged := true
+                break
+    if not merged
+        ZoneInfo newZone = ZoneInfo.new(zHigh, zLow, BEARISH, 1, bar_index - srPivotLen)
+        array.push(srZones, newZone)
+        // Manage zone limit - evict zone furthest from current price
+        if array.size(srZones) > maxZones
+            int evictIdx = 0
+            float maxDist = 0.0
+            for k = 0 to array.size(srZones) - 1
+                ZoneInfo z = array.get(srZones, k)
+                float zoneMid = (z.priceHigh + z.priceLow) / 2.0
+                float dist = math.abs(close - zoneMid)
+                if dist > maxDist
+                    maxDist := dist
+                    evictIdx := k
+            ZoneInfo evicted = array.remove(srZones, evictIdx)
+            if not na(evicted.boxRef)
+                box.delete(evicted.boxRef)
+
+// Add new support zone when pivot low detected
+if not na(srPivotL) and showLayer3
+    float zHigh2 = srPivotL + zoneThickness / 2.0
+    float zLow2 = srPivotL - zoneThickness / 2.0
+    bool merged2 = false
+    if array.size(srZones) > 0
+        for i = 0 to array.size(srZones) - 1
+            ZoneInfo existingZone = array.get(srZones, i)
+            if math.abs(existingZone.priceLow - zLow2) < nz(atrVal) * zoneMergeDist
+                existingZone.strength += 1
+                merged2 := true
+                break
+    if not merged2
+        ZoneInfo newZone2 = ZoneInfo.new(zHigh2, zLow2, BULLISH, 1, bar_index - srPivotLen)
+        array.push(srZones, newZone2)
+        // Manage zone limit - evict zone furthest from current price
+        if array.size(srZones) > maxZones
+            int evictIdx2 = 0
+            float maxDist2 = 0.0
+            for k = 0 to array.size(srZones) - 1
+                ZoneInfo z = array.get(srZones, k)
+                float zoneMid = (z.priceHigh + z.priceLow) / 2.0
+                float dist = math.abs(close - zoneMid)
+                if dist > maxDist2
+                    maxDist2 := dist
+                    evictIdx2 := k
+            ZoneInfo evicted2 = array.remove(srZones, evictIdx2)
+            if not na(evicted2.boxRef)
+                box.delete(evicted2.boxRef)
+
+
+// --- EQH/EQL Detection (Liquidity Pools) ---
+
+var float[] recentHighs = array.new_float(0)
+var float[] recentLows = array.new_float(0)
+var int[] recentHighBars = array.new_int(0)
+var int[] recentLowBars = array.new_int(0)
+
+// Track swing highs for EQH detection
+if not na(srPivotH)
+    array.push(recentHighs, srPivotH)
+    array.push(recentHighBars, bar_index - srPivotLen)
+    if array.size(recentHighs) > 20
+        array.shift(recentHighs)
+        array.shift(recentHighBars)
+
+// Track swing lows for EQL detection
+if not na(srPivotL)
+    array.push(recentLows, srPivotL)
+    array.push(recentLowBars, bar_index - srPivotLen)
+    if array.size(recentLows) > 20
+        array.shift(recentLows)
+        array.shift(recentLowBars)
+
+// Detect Equal Highs (EQH) - compare all pairs in recent arrays
+bool eqhDetected = false
+float eqhLevel = na
+if array.size(recentHighs) >= 2
+    int hSize = array.size(recentHighs)
+    int checkCount = math.min(hSize, 5)  // Check last 5 entries against each other
+    for i = hSize - checkCount to hSize - 1
+        if eqhDetected
+            break
+        float hi = array.get(recentHighs, i)
+        for j = i + 1 to hSize - 1
+            float hj = array.get(recentHighs, j)
+            if math.abs(hi - hj) / nz(hi, 1.0) < EQH_EQL_TOLERANCE
+                eqhDetected := true
+                eqhLevel := math.max(hi, hj)
+                break
+
+// Detect Equal Lows (EQL) - compare all pairs in recent arrays
+bool eqlDetected = false
+float eqlLevel = na
+if array.size(recentLows) >= 2
+    int lSize = array.size(recentLows)
+    int checkCountL = math.min(lSize, 5)  // Check last 5 entries against each other
+    for i = lSize - checkCountL to lSize - 1
+        if eqlDetected
+            break
+        float li = array.get(recentLows, i)
+        for j = i + 1 to lSize - 1
+            float lj = array.get(recentLows, j)
+            if math.abs(li - lj) / nz(li, 1.0) < EQH_EQL_TOLERANCE
+                eqlDetected := true
+                eqlLevel := math.min(li, lj)
+                break
+
+
+// --- PDH/PDL and PWH/PWL Levels ---
+
+[prevDayHigh, prevDayLow] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[prevWeekHigh, prevWeekLow] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+
+float pdh = nz(prevDayHigh)
+float pdl = nz(prevDayLow)
+float pwh = nz(prevWeekHigh)
+float pwl = nz(prevWeekLow)
+
+// --- FVG Detection (Fair Value Gaps) ---
+
+bool bullishFVG = false
+float fvgHighBull = na
+float fvgLowBull = na
+bool bearishFVG = false
+float fvgHighBear = na
+float fvgLowBear = na
+
+if useFVG and barstate.isconfirmed
+    // Bullish FVG: candle[2] high < candle[0] low (gap up)
+    if low > high[2]
+        bullishFVG := true
+        fvgHighBull := low
+        fvgLowBull := high[2]
+    // Bearish FVG: candle[2] low > candle[0] high (gap down)
+    if high < low[2]
+        bearishFVG := true
+        fvgHighBear := low[2]
+        fvgLowBear := high
+
+// --- Entry Confirmation Sequence ---
+
+// Step 1: Liquidity Sweep Detection
+// A sweep occurs when price wicks through a level but closes back inside
+float bodySize = math.abs(close - open)
+float wickUp = high - math.max(close, open)
+float wickDown = math.min(close, open) - low
+float totalRange = nz(high - low, 0.0001)
+float wickUpRatio = wickUp / totalRange
+float wickDownRatio = wickDown / totalRange
+
+// Check for sweep of key levels
+bool sweepHigh = false
+bool sweepLow = false
+
+if barstate.isconfirmed
+    // Bearish sweep: wick above resistance/EQH/PWH but close below
+    if wickUpRatio >= sweepWickPct
+        if (high > pdh and close < pdh) or (eqhDetected and not na(eqhLevel) and high > eqhLevel and close < eqhLevel) or (high > pwh and close < pwh)
+            sweepHigh := true
+    // Bullish sweep: wick below support/EQL/PWL but close above
+    if wickDownRatio >= sweepWickPct
+        if (low < pdl and close > pdl) or (eqlDetected and not na(eqlLevel) and low < eqlLevel and close > eqlLevel) or (low < pwl and close > pwl)
+            sweepLow := true
+
+
+// Step 2: CISD / Displacement Confirmation
+// Large body candle (displacement) within CISD window after sweep
+float avgBody = ta.sma(bodySize, 14)
+bool displacementCandle = bodySize > nz(avgBody) * displacementMult
+
+// Track sweep state
+var int sweepBar = na
+var int sweepDirection = 0
+var float sweepExtreme = na
+
+if sweepHigh and htfBias == BEARISH and ltfReady
+    sweepBar := bar_index
+    sweepDirection := BEARISH
+    sweepExtreme := high
+    tradeState.status := "Sweep Detected"
+    tradeState.direction := BEARISH
+
+if sweepLow and htfBias == BULLISH and ltfReady
+    sweepBar := bar_index
+    sweepDirection := BULLISH
+    sweepExtreme := low
+    tradeState.status := "Sweep Detected"
+    tradeState.direction := BULLISH
+
+// Check for displacement within CISD window
+bool cisdConfirmed = false
+if not na(sweepBar) and bar_index - sweepBar <= cisdWindow and bar_index > sweepBar
+    if sweepDirection == BEARISH and displacementCandle and close < open
+        cisdConfirmed := true
+    if sweepDirection == BULLISH and displacementCandle and close > open
+        cisdConfirmed := true
+    // FVG as additional confirmation
+    if useFVG
+        if sweepDirection == BEARISH and bearishFVG
+            cisdConfirmed := true
+        if sweepDirection == BULLISH and bullishFVG
+            cisdConfirmed := true
+
+// Reset sweep if expired
+if not na(sweepBar) and bar_index - sweepBar > cisdWindow and not cisdConfirmed
+    if tradeState.status == "Sweep Detected"
+        tradeState.status := "Idle"
+    sweepBar := na
+    sweepDirection := 0
+    sweepExtreme := na
+
+
+// Step 3: Entry Signal Generation
+bool entrySignal = false
+float entryPrice = na
+float slPrice = na
+float tp1Price = na
+float tp2Price = na
+float tp3Price = na
+
+if cisdConfirmed and barstate.isconfirmed and isInKillZone()
+    tradeState.status := "Confirmed"
+    if sweepDirection == BEARISH
+        entryPrice := close
+        slPrice := nz(sweepExtreme, high)
+        float risk = slPrice - entryPrice
+        tp1Price := entryPrice - risk * tp1RR
+        tp2Price := entryPrice - risk * tp2RR
+        tp3Price := useTP3Daily ? pdl : entryPrice - risk * tp2RR * 1.5
+        entrySignal := true
+    else if sweepDirection == BULLISH
+        entryPrice := close
+        slPrice := nz(sweepExtreme, low)
+        float risk = entryPrice - slPrice
+        tp1Price := entryPrice + risk * tp1RR
+        tp2Price := entryPrice + risk * tp2RR
+        tp3Price := useTP3Daily ? pdh : entryPrice + risk * tp2RR * 1.5
+        entrySignal := true
+
+    if entrySignal
+        tradeState.status := "Entry Active"
+        tradeState.entry := entryPrice
+        tradeState.sl := slPrice
+        tradeState.tp1 := tp1Price
+        tradeState.tp2 := tp2Price
+        tradeState.tp3 := tp3Price
+        tradeState.direction := sweepDirection
+        tradeState.signalBar := bar_index
+        // Reset sweep tracking
+        sweepBar := na
+        sweepDirection := 0
+        sweepExtreme := na
+
+// Reset trade state when TP1 hit or SL hit
+if tradeState.status == "Entry Active"
+    if tradeState.direction == BULLISH
+        if high >= nz(tradeState.tp1) or low <= nz(tradeState.sl)
+            tradeState.status := "Idle"
+            tradeState.entry := na
+            tradeState.sl := na
+            tradeState.tp1 := na
+            tradeState.tp2 := na
+            tradeState.tp3 := na
+            tradeState.direction := 0
+            tradeState.signalBar := na
+            // Delete trade lines on exit
+            if not na(lineEntry)
+                line.delete(lineEntry)
+                lineEntry := na
+            if not na(lineSL)
+                line.delete(lineSL)
+                lineSL := na
+            if not na(lineTP1)
+                line.delete(lineTP1)
+                lineTP1 := na
+    else if tradeState.direction == BEARISH
+        if low <= nz(tradeState.tp1) or high >= nz(tradeState.sl)
+            tradeState.status := "Idle"
+            tradeState.entry := na
+            tradeState.sl := na
+            tradeState.tp1 := na
+            tradeState.tp2 := na
+            tradeState.tp3 := na
+            tradeState.direction := 0
+            tradeState.signalBar := na
+            // Delete trade lines on exit
+            if not na(lineEntry)
+                line.delete(lineEntry)
+                lineEntry := na
+            if not na(lineSL)
+                line.delete(lineSL)
+                lineSL := na
+            if not na(lineTP1)
+                line.delete(lineTP1)
+                lineTP1 := na
+
+
+// --- Visual Drawing ---
+
+// Draw S/R Zones as boxes
+if showLayer3 and array.size(srZones) > 0
+    // Delete old boxes first to manage limits
+    for i = 0 to array.size(zoneBoxes) - 1
+        box.delete(array.get(zoneBoxes, i))
+    array.clear(zoneBoxes)
+
+    for i = 0 to array.size(srZones) - 1
+        ZoneInfo zone = array.get(srZones, i)
+        color zoneColor = zone.direction == BULLISH ? color.new(bullColor, 80) : color.new(bearColor, 80)
+        color borderColor = zone.direction == BULLISH ? bullColor : bearColor
+        box zoneBox = box.new(zone.birthBar, zone.priceHigh, bar_index + 20, zone.priceLow, border_color = borderColor, border_width = 1, bgcolor = zoneColor, xloc = xloc.bar_index)
+        array.push(zoneBoxes, zoneBox)
+        zone.boxRef := zoneBox
+
+// Draw PDH/PDL lines
+if showPDHL and showLayer3
+    if not na(linePDH)
+        line.delete(linePDH)
+    if not na(linePDL)
+        line.delete(linePDL)
+    linePDH := line.new(bar_index - 1, pdh, bar_index, pdh, xloc = xloc.bar_index, extend = extend.both, color = pdhPdlColor, style = line.style_dashed, width = lineWidth)
+    linePDL := line.new(bar_index - 1, pdl, bar_index, pdl, xloc = xloc.bar_index, extend = extend.both, color = pdhPdlColor, style = line.style_dashed, width = lineWidth)
+
+// Draw PWH/PWL lines
+if showPWHL and showLayer3
+    if not na(linePWH)
+        line.delete(linePWH)
+    if not na(linePWL)
+        line.delete(linePWL)
+    linePWH := line.new(bar_index - 1, pwh, bar_index, pwh, xloc = xloc.bar_index, extend = extend.both, color = pwhPwlColor, style = line.style_solid, width = lineWidth)
+    linePWL := line.new(bar_index - 1, pwl, bar_index, pwl, xloc = xloc.bar_index, extend = extend.both, color = pwhPwlColor, style = line.style_solid, width = lineWidth)
+
+// Draw EQH/EQL liquidity pool lines
+var line lineEQH = na
+var line lineEQL = na
+
+if showLiquidity and showLayer3
+    if not na(lineEQH)
+        line.delete(lineEQH)
+    if not na(lineEQL)
+        line.delete(lineEQL)
+    if eqhDetected and not na(eqhLevel)
+        lineEQH := line.new(bar_index - 1, eqhLevel, bar_index, eqhLevel, xloc = xloc.bar_index, extend = extend.both, color = color.new(bearColor, 40), style = line.style_dotted, width = lineWidth + 1)
+    if eqlDetected and not na(eqlLevel)
+        lineEQL := line.new(bar_index - 1, eqlLevel, bar_index, eqlLevel, xloc = xloc.bar_index, extend = extend.both, color = color.new(bullColor, 40), style = line.style_dotted, width = lineWidth + 1)
+
+
+// Draw FVG boxes
+if showFVG and showLayer3
+    // Manage FVG box limit
+    if array.size(fvgBoxes) > 50
+        box oldFvg = array.shift(fvgBoxes)
+        box.delete(oldFvg)
+    if bullishFVG and not na(fvgHighBull) and not na(fvgLowBull)
+        box fvgBox = box.new(bar_index - 2, fvgHighBull, bar_index, fvgLowBull, border_color = color.new(bullColor, 60), border_width = 1, bgcolor = color.new(bullColor, 85), xloc = xloc.bar_index)
+        array.push(fvgBoxes, fvgBox)
+    if bearishFVG and not na(fvgHighBear) and not na(fvgLowBear)
+        box fvgBox2 = box.new(bar_index - 2, fvgHighBear, bar_index, fvgLowBear, border_color = color.new(bearColor, 60), border_width = 1, bgcolor = color.new(bearColor, 85), xloc = xloc.bar_index)
+        array.push(fvgBoxes, fvgBox2)
+
+// Draw Entry/SL/TP lines when signal fires
+if entrySignal and showLayer3
+    if not na(lineEntry)
+        line.delete(lineEntry)
+    if not na(lineSL)
+        line.delete(lineSL)
+    if not na(lineTP1)
+        line.delete(lineTP1)
+    lineEntry := line.new(bar_index, entryPrice, bar_index + 1, entryPrice, xloc = xloc.bar_index, extend = extend.both, color = color.white, style = line.style_solid, width = 2)
+    lineSL := line.new(bar_index, slPrice, bar_index + 1, slPrice, xloc = xloc.bar_index, extend = extend.both, color = bearColor, style = line.style_dashed, width = 1)
+    lineTP1 := line.new(bar_index, tp1Price, bar_index + 1, tp1Price, xloc = xloc.bar_index, extend = extend.both, color = bullColor, style = line.style_dashed, width = 1)
+
+// Premium/Discount zone background
+bgcolor(showLayer1 and inPremium ? color.new(bearColor, 95) : showLayer1 and inDiscount ? color.new(bullColor, 95) : na)
+
+
+// --- Dashboard ---
+
+if showDashboard
+    // Determine table position
+    var string tablePos = position.top_right
+    if dashPosition == "Top Left"
+        tablePos := position.top_left
+    else if dashPosition == "Bottom Right"
+        tablePos := position.bottom_right
+    else if dashPosition == "Bottom Left"
+        tablePos := position.bottom_left
+
+    // Determine text size
+    var string textSize = size.normal
+    if dashSize == "Small"
+        textSize := size.small
+    else if dashSize == "Large"
+        textSize := size.large
+
+    var table dashboard = table.new(tablePos, 5, 6, border_width = 1)
+
+    // Row 0: Header
+    table.cell(dashboard, 0, 0, "PHANTOM EDGE", text_color = color.white, bgcolor = color.new(color.gray, 40), text_size = textSize)
+    table.merge_cells(dashboard, 0, 0, 4, 0)
+
+    // Row 1: HTF Bias (1W / 1D / 4H)
+    string wTxt = weeklyTrend == BULLISH ? "Bull" : weeklyTrend == BEARISH ? "Bear" : "Range"
+    string dTxt = dailyTrend == BULLISH ? "Bull" : dailyTrend == BEARISH ? "Bear" : "Range"
+    string h4Txt = h4Trend == BULLISH ? "Bull" : h4Trend == BEARISH ? "Bear" : "Range"
+    color wCol = weeklyTrend == BULLISH ? bullColor : weeklyTrend == BEARISH ? bearColor : color.gray
+    color dCol = dailyTrend == BULLISH ? bullColor : dailyTrend == BEARISH ? bearColor : color.gray
+    color h4Col = h4Trend == BULLISH ? bullColor : h4Trend == BEARISH ? bearColor : color.gray
+
+    table.cell(dashboard, 0, 1, "HTF:", text_color = color.white, bgcolor = color.new(color.gray, 60), text_size = textSize)
+    table.cell(dashboard, 1, 1, "1W:" + wTxt, text_color = color.white, bgcolor = color.new(wCol, 40), text_size = textSize)
+    table.cell(dashboard, 2, 1, "1D:" + dTxt, text_color = color.white, bgcolor = color.new(dCol, 40), text_size = textSize)
+    table.cell(dashboard, 3, 1, "4H:" + h4Txt, text_color = color.white, bgcolor = color.new(h4Col, 40), text_size = textSize)
+    table.cell(dashboard, 4, 1, "", bgcolor = color.new(color.gray, 60), text_size = textSize)
+
+    // Row 2: LTF Alignment (2H / 1H / 30M / 15M)
+    string ltf2hTxt = ltf2hTrend == BULLISH ? "Bull" : ltf2hTrend == BEARISH ? "Bear" : "Range"
+    string ltf1hTxt = ltf1hTrend == BULLISH ? "Bull" : ltf1hTrend == BEARISH ? "Bear" : "Range"
+    string ltf30mTxt = ltf30mTrend == BULLISH ? "Bull" : ltf30mTrend == BEARISH ? "Bear" : "Range"
+    string ltf15mTxt = ltf15mTrend == BULLISH ? "Bull" : ltf15mTrend == BEARISH ? "Bear" : "Range"
+
+    table.cell(dashboard, 0, 2, "LTF:", text_color = color.white, bgcolor = color.new(color.gray, 60), text_size = textSize)
+    table.cell(dashboard, 1, 2, "2H:" + ltf2hTxt, text_color = color.white, bgcolor = color.new(ltf2hTrend == htfBias ? bullColor : color.gray, 40), text_size = textSize)
+    table.cell(dashboard, 2, 2, "1H:" + ltf1hTxt, text_color = color.white, bgcolor = color.new(ltf1hTrend == htfBias ? bullColor : color.gray, 40), text_size = textSize)
+    table.cell(dashboard, 3, 2, "30M:" + ltf30mTxt, text_color = color.white, bgcolor = color.new(ltf30mTrend == htfBias ? bullColor : color.gray, 40), text_size = textSize)
+    table.cell(dashboard, 4, 2, "15M:" + ltf15mTxt, text_color = color.white, bgcolor = color.new(ltf15mTrend == htfBias ? bullColor : color.gray, 40), text_size = textSize)
+
+    // Row 3: Overall Verdict
+    string biasText = htfBias == BULLISH ? "Bullish" : htfBias == BEARISH ? "Bearish" : "Ranging"
+    color biasCol = htfBias == BULLISH ? bullColor : htfBias == BEARISH ? bearColor : color.gray
+    color readyCol = ltfReady ? bullColor : color.orange
+
+    table.cell(dashboard, 0, 3, "WHERE: " + biasText, text_color = color.white, bgcolor = color.new(biasCol, 30), text_size = textSize)
+    table.merge_cells(dashboard, 0, 3, 2, 3)
+    table.cell(dashboard, 3, 3, "WHEN: " + ltfStatus, text_color = color.white, bgcolor = color.new(readyCol, 30), text_size = textSize)
+    table.merge_cells(dashboard, 3, 3, 4, 3)
+
+    // Row 4: Setup State
+    color stateCol = tradeState.status == "Entry Active" ? bullColor : tradeState.status == "Confirmed" ? color.lime : tradeState.status == "Sweep Detected" ? color.orange : color.gray
+    table.cell(dashboard, 0, 4, "State: " + tradeState.status, text_color = color.white, bgcolor = color.new(stateCol, 40), text_size = textSize)
+    table.merge_cells(dashboard, 0, 4, 4, 4)
+
+    // Row 5: Active Trade Info
+    string tradeInfo = tradeState.status == "Entry Active" ? "E:" + str.tostring(tradeState.entry, "#.##") + " SL:" + str.tostring(tradeState.sl, "#.##") + " TP1:" + str.tostring(tradeState.tp1, "#.##") : "No active setup"
+    table.cell(dashboard, 0, 5, tradeInfo, text_color = color.white, bgcolor = color.new(color.gray, 60), text_size = textSize)
+    table.merge_cells(dashboard, 0, 5, 4, 5)
+
+
+// --- Alerts ---
+
+// Detect bias change
+bool biasChanged = htfBias != prevHtfBias and prevHtfBias != 0
+prevHtfBias := htfBias
+
+// Detect LTF alignment transition
+bool ltfJustAligned = ltfReady and not prevLtfReady
+prevLtfReady := ltfReady
+
+// Sweep detection alert condition
+bool sweepAlert = sweepHigh or sweepLow
+
+// Entry signal action for dynamic alerts
+string entryAction = entrySignal ? (tradeState.direction == BULLISH ? "BUY" : "SELL") : ""
+
+// Static alertcondition() calls (compile-time constant messages only)
+alertcondition(biasChanged and alertBiasChange, title = "HTF Bias Changed", message = "Phantom Edge: HTF Bias changed on {{ticker}} at {{close}}")
+alertcondition(ltfJustAligned and alertLTFAligned, title = "LTF Aligned", message = "Phantom Edge: LTF timeframes aligned with HTF bias on {{ticker}} at {{close}}")
+alertcondition(sweepAlert and alertSweep, title = "Sweep Detected", message = "Phantom Edge: Liquidity sweep detected on {{ticker}} at {{close}}")
+alertcondition(entrySignal and alertEntry, title = "Entry Signal", message = "Phantom Edge: Entry signal on {{ticker}} at {{close}}")
+
+// Dynamic alert() calls for detailed JSON payloads
+if biasChanged and alertBiasChange
+    string biasStr = htfBias == BULLISH ? "BULLISH" : htfBias == BEARISH ? "BEARISH" : "RANGING"
+    alert("Phantom Edge: HTF Bias changed to " + biasStr + " on " + syminfo.ticker, alert.freq_once_per_bar)
+
+if entrySignal and alertEntry
+    string jsonPayload = '{"ticker":"' + syminfo.ticker + '","action":"' + entryAction + '","entry":' + str.tostring(nz(entryPrice)) + ',"sl":' + str.tostring(nz(slPrice)) + ',"tp1":' + str.tostring(nz(tp1Price)) + ',"tp2":' + str.tostring(nz(tp2Price)) + ',"tp3":' + str.tostring(nz(tp3Price)) + '}'
+    alert(jsonPayload, alert.freq_once_per_bar)
+
+// --- End of Script ---
