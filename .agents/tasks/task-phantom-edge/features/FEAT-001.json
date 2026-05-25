@@ -55,5 +55,5 @@
     "Run: grep 'group' /projects/sandbox/ai-2/indicators/phantom-edge.pine | sort -u | wc -l to confirm input groups (should be >= 9)"
   ],
   "blocked_reason": null,
-  "findings": "File created at 754 lines. All verification checks pass: 9 extend.both occurrences, 4 barstate.isconfirmed, 10 request.security calls, 11 barmerge.lookahead_off, 4 alertcondition calls, 9 unique input groups, balanced brackets. No local Pine Script compiler available so syntax validation is structural only."
+  "findings": "File created at 754 lines, expanded to 852 lines after review fixes. All 7 semantic review issues addressed: (1) pivot tracking uses two-variable shift pattern, (2) alertcondition uses static messages with alert() for dynamic data, (3) PDH/PDL uses lookahead_on with high[1]/low[1], (4) sweep logic decoupled from showPDHL toggle, (5) trade state fully resets on exit with line deletion, (6) EQH/EQL uses nested loops for last 5 entries, (7) zone eviction uses distance-based removal. Balanced brackets confirmed. No local Pine Script compiler available."
 }
