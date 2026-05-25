@@ -40,13 +40,6 @@ type TradeState
     int direction = 0       // 1 = long, -1 = short
     int signalBar = na
 
-type PivotData
-    float pivotHigh = na
-    float pivotLow = na
-    float prevPivotHigh = na
-    float prevPivotLow = na
-    int trend = 0           // 1 = bullish, -1 = bearish, 0 = ranging
-
 
 // --- Input Group 1: HTF Bias ---
 
@@ -55,7 +48,7 @@ int htfPivotLen = input.int(5, "Pivot Length", minval = 2, maxval = 50, group = 
 bool useWeekly = input.bool(true, "Use Weekly (1W)", group = GRP_HTF)
 bool useDaily = input.bool(true, "Use Daily (1D)", group = GRP_HTF)
 bool use4H = input.bool(true, "Use 4H", group = GRP_HTF)
-int htfLookback = input.int(100, "Lookback Bars", minval = 10, maxval = 500, group = GRP_HTF)
+
 
 // --- Input Group 2: LTF Alignment ---
 
@@ -83,7 +76,7 @@ float sweepWickPct = input.float(0.6, "Sweep Wick % Threshold", minval = 0.1, ma
 int cisdWindow = input.int(5, "CISD Confirmation Window (bars)", minval = 1, maxval = 20, group = GRP_ENTRY)
 float displacementMult = input.float(1.5, "Displacement Body Multiplier", minval = 1.0, maxval = 5.0, step = 0.1, group = GRP_ENTRY)
 bool useFVG = input.bool(true, "Detect FVG (Fair Value Gaps)", group = GRP_ENTRY)
-bool useRetest = input.bool(true, "Retest Entry Option", group = GRP_ENTRY)
+
 
 // --- Input Group 5: Risk & Targets ---
 
@@ -91,7 +84,7 @@ string GRP_RISK = "5. Risk & Targets"
 float tp1RR = input.float(1.5, "TP1 Risk:Reward", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
 float tp2RR = input.float(3.0, "TP2 Risk:Reward", minval = 1.0, maxval = 20.0, step = 0.5, group = GRP_RISK)
 bool useTP3Daily = input.bool(true, "TP3: Opposing Daily Level", group = GRP_RISK)
-bool useDynamicTargets = input.bool(false, "Use Dynamic Targets", group = GRP_RISK)
+
 
 // --- Input Group 6: Kill Zones ---
 
@@ -241,9 +234,9 @@ if not na(h4PL) and h4PL != current4HPL
     current4HPL := h4PL
 
 // Determine trend for each HTF
-int weeklyTrend = useWeekly ? detectTrend(nz(currentWPH), nz(currentWPL), nz(prevWPH), nz(prevWPL)) : RANGING
-int dailyTrend = useDaily ? detectTrend(nz(currentDPH), nz(currentDPL), nz(prevDPH), nz(prevDPL)) : RANGING
-int h4Trend = use4H ? detectTrend(nz(current4HPH), nz(current4HPL), nz(prev4HPH), nz(prev4HPL)) : RANGING
+int weeklyTrend = useWeekly ? detectTrend(currentWPH, currentWPL, prevWPH, prevWPL) : RANGING
+int dailyTrend = useDaily ? detectTrend(currentDPH, currentDPL, prevDPH, prevDPL) : RANGING
+int h4Trend = use4H ? detectTrend(current4HPH, current4HPL, prev4HPH, prev4HPL) : RANGING
 
 // 2-of-3 consensus for HTF bias
 int bullCount = (weeklyTrend == BULLISH ? 1 : 0) + (dailyTrend == BULLISH ? 1 : 0) + (h4Trend == BULLISH ? 1 : 0)
@@ -316,10 +309,10 @@ if not na(ltf15mPL) and ltf15mPL != currentLtf15mPL
     currentLtf15mPL := ltf15mPL
 
 // Determine LTF trends
-int ltf2hTrend = use2H ? detectTrend(nz(currentLtf2hPH), nz(currentLtf2hPL), nz(prevLtf2hPH), nz(prevLtf2hPL)) : RANGING
-int ltf1hTrend = use1H ? detectTrend(nz(currentLtf1hPH), nz(currentLtf1hPL), nz(prevLtf1hPH), nz(prevLtf1hPL)) : RANGING
-int ltf30mTrend = use30M ? detectTrend(nz(currentLtf30mPH), nz(currentLtf30mPL), nz(prevLtf30mPH), nz(prevLtf30mPL)) : RANGING
-int ltf15mTrend = use15M ? detectTrend(nz(currentLtf15mPH), nz(currentLtf15mPL), nz(prevLtf15mPH), nz(prevLtf15mPL)) : RANGING
+int ltf2hTrend = use2H ? detectTrend(currentLtf2hPH, currentLtf2hPL, prevLtf2hPH, prevLtf2hPL) : RANGING
+int ltf1hTrend = use1H ? detectTrend(currentLtf1hPH, currentLtf1hPL, prevLtf1hPH, prevLtf1hPL) : RANGING
+int ltf30mTrend = use30M ? detectTrend(currentLtf30mPH, currentLtf30mPL, prevLtf30mPH, prevLtf30mPL) : RANGING
+int ltf15mTrend = use15M ? detectTrend(currentLtf15mPH, currentLtf15mPL, prevLtf15mPH, prevLtf15mPL) : RANGING
 
 // Check alignment with HTF bias
 int ltfAlignCount = 0
@@ -527,13 +520,13 @@ bool sweepHigh = false
 bool sweepLow = false
 
 if barstate.isconfirmed
-    // Bearish sweep: wick above resistance/EQH but close below
+    // Bearish sweep: wick above resistance/EQH/PWH but close below
     if wickUpRatio >= sweepWickPct
-        if (high > pdh and close < pdh) or (eqhDetected and not na(eqhLevel) and high > eqhLevel and close < eqhLevel)
+        if (high > pdh and close < pdh) or (eqhDetected and not na(eqhLevel) and high > eqhLevel and close < eqhLevel) or (high > pwh and close < pwh)
             sweepHigh := true
-    // Bullish sweep: wick below support/EQL but close above
+    // Bullish sweep: wick below support/EQL/PWL but close above
     if wickDownRatio >= sweepWickPct
-        if (low < pdl and close > pdl) or (eqlDetected and not na(eqlLevel) and low < eqlLevel and close > eqlLevel)
+        if (low < pdl and close > pdl) or (eqlDetected and not na(eqlLevel) and low < eqlLevel and close > eqlLevel) or (low < pwl and close > pwl)
             sweepLow := true
 
 
@@ -636,6 +629,7 @@ if tradeState.status == "Entry Active"
             tradeState.tp2 := na
             tradeState.tp3 := na
             tradeState.direction := 0
+            tradeState.signalBar := na
             // Delete trade lines on exit
             if not na(lineEntry)
                 line.delete(lineEntry)
@@ -655,6 +649,7 @@ if tradeState.status == "Entry Active"
             tradeState.tp2 := na
             tradeState.tp3 := na
             tradeState.direction := 0
+            tradeState.signalBar := na
             // Delete trade lines on exit
             if not na(lineEntry)
                 line.delete(lineEntry)
