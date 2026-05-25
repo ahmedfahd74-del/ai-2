@@ -206,7 +206,13 @@ pivotLow(int len) =>
 // 4H pivot data
 [h4PH, h4PL] = request.security(syminfo.tickerid, "240", [pivotHigh(htfPivotLen), pivotLow(htfPivotLen)], lookahead = barmerge.lookahead_off)
 
-// Track previous pivots for trend detection using var
+// Track current and previous pivots for trend detection using var
+var float currentWPH = na
+var float currentWPL = na
+var float currentDPH = na
+var float currentDPL = na
+var float current4HPH = na
+var float current4HPL = na
 var float prevWPH = na
 var float prevWPL = na
 var float prevDPH = na
@@ -214,24 +220,30 @@ var float prevDPL = na
 var float prev4HPH = na
 var float prev4HPL = na
 
-// Update previous pivots when new ones form
-if not na(wPH) and wPH != prevWPH
-    prevWPH := nz(wPH[1], wPH)
-if not na(wPL) and wPL != prevWPL
-    prevWPL := nz(wPL[1], wPL)
-if not na(dPH) and dPH != prevDPH
-    prevDPH := nz(dPH[1], dPH)
-if not na(dPL) and dPL != prevDPL
-    prevDPL := nz(dPL[1], dPL)
-if not na(h4PH) and h4PH != prev4HPH
-    prev4HPH := nz(h4PH[1], h4PH)
-if not na(h4PL) and h4PL != prev4HPL
-    prev4HPL := nz(h4PL[1], h4PL)
+// Update previous pivots when new ones form (shift old current into prev, then update current)
+if not na(wPH) and wPH != currentWPH
+    prevWPH := currentWPH
+    currentWPH := wPH
+if not na(wPL) and wPL != currentWPL
+    prevWPL := currentWPL
+    currentWPL := wPL
+if not na(dPH) and dPH != currentDPH
+    prevDPH := currentDPH
+    currentDPH := dPH
+if not na(dPL) and dPL != currentDPL
+    prevDPL := currentDPL
+    currentDPL := dPL
+if not na(h4PH) and h4PH != current4HPH
+    prev4HPH := current4HPH
+    current4HPH := h4PH
+if not na(h4PL) and h4PL != current4HPL
+    prev4HPL := current4HPL
+    current4HPL := h4PL
 
 // Determine trend for each HTF
-int weeklyTrend = useWeekly ? detectTrend(nz(wPH), nz(wPL), nz(prevWPH), nz(prevWPL)) : RANGING
-int dailyTrend = useDaily ? detectTrend(nz(dPH), nz(dPL), nz(prevDPH), nz(prevDPL)) : RANGING
-int h4Trend = use4H ? detectTrend(nz(h4PH), nz(h4PL), nz(prev4HPH), nz(prev4HPL)) : RANGING
+int weeklyTrend = useWeekly ? detectTrend(nz(currentWPH), nz(currentWPL), nz(prevWPH), nz(prevWPL)) : RANGING
+int dailyTrend = useDaily ? detectTrend(nz(currentDPH), nz(currentDPL), nz(prevDPH), nz(prevDPL)) : RANGING
+int h4Trend = use4H ? detectTrend(nz(current4HPH), nz(current4HPL), nz(prev4HPH), nz(prev4HPL)) : RANGING
 
 // 2-of-3 consensus for HTF bias
 int bullCount = (weeklyTrend == BULLISH ? 1 : 0) + (dailyTrend == BULLISH ? 1 : 0) + (h4Trend == BULLISH ? 1 : 0)
@@ -260,7 +272,15 @@ bool inDiscount = close < dailyMid
 // 15M pivot data
 [ltf15mPH, ltf15mPL] = request.security(syminfo.tickerid, "15", [pivotHigh(ltfPivotLen), pivotLow(ltfPivotLen)], lookahead = barmerge.lookahead_off)
 
-// Track previous LTF pivots
+// Track current and previous LTF pivots
+var float currentLtf2hPH = na
+var float currentLtf2hPL = na
+var float currentLtf1hPH = na
+var float currentLtf1hPL = na
+var float currentLtf30mPH = na
+var float currentLtf30mPL = na
+var float currentLtf15mPH = na
+var float currentLtf15mPL = na
 var float prevLtf2hPH = na
 var float prevLtf2hPL = na
 var float prevLtf1hPH = na
@@ -270,28 +290,36 @@ var float prevLtf30mPL = na
 var float prevLtf15mPH = na
 var float prevLtf15mPL = na
 
-if not na(ltf2hPH) and ltf2hPH != prevLtf2hPH
-    prevLtf2hPH := nz(ltf2hPH[1], ltf2hPH)
-if not na(ltf2hPL) and ltf2hPL != prevLtf2hPL
-    prevLtf2hPL := nz(ltf2hPL[1], ltf2hPL)
-if not na(ltf1hPH) and ltf1hPH != prevLtf1hPH
-    prevLtf1hPH := nz(ltf1hPH[1], ltf1hPH)
-if not na(ltf1hPL) and ltf1hPL != prevLtf1hPL
-    prevLtf1hPL := nz(ltf1hPL[1], ltf1hPL)
-if not na(ltf30mPH) and ltf30mPH != prevLtf30mPH
-    prevLtf30mPH := nz(ltf30mPH[1], ltf30mPH)
-if not na(ltf30mPL) and ltf30mPL != prevLtf30mPL
-    prevLtf30mPL := nz(ltf30mPL[1], ltf30mPL)
-if not na(ltf15mPH) and ltf15mPH != prevLtf15mPH
-    prevLtf15mPH := nz(ltf15mPH[1], ltf15mPH)
-if not na(ltf15mPL) and ltf15mPL != prevLtf15mPL
-    prevLtf15mPL := nz(ltf15mPL[1], ltf15mPL)
+if not na(ltf2hPH) and ltf2hPH != currentLtf2hPH
+    prevLtf2hPH := currentLtf2hPH
+    currentLtf2hPH := ltf2hPH
+if not na(ltf2hPL) and ltf2hPL != currentLtf2hPL
+    prevLtf2hPL := currentLtf2hPL
+    currentLtf2hPL := ltf2hPL
+if not na(ltf1hPH) and ltf1hPH != currentLtf1hPH
+    prevLtf1hPH := currentLtf1hPH
+    currentLtf1hPH := ltf1hPH
+if not na(ltf1hPL) and ltf1hPL != currentLtf1hPL
+    prevLtf1hPL := currentLtf1hPL
+    currentLtf1hPL := ltf1hPL
+if not na(ltf30mPH) and ltf30mPH != currentLtf30mPH
+    prevLtf30mPH := currentLtf30mPH
+    currentLtf30mPH := ltf30mPH
+if not na(ltf30mPL) and ltf30mPL != currentLtf30mPL
+    prevLtf30mPL := currentLtf30mPL
+    currentLtf30mPL := ltf30mPL
+if not na(ltf15mPH) and ltf15mPH != currentLtf15mPH
+    prevLtf15mPH := currentLtf15mPH
+    currentLtf15mPH := ltf15mPH
+if not na(ltf15mPL) and ltf15mPL != currentLtf15mPL
+    prevLtf15mPL := currentLtf15mPL
+    currentLtf15mPL := ltf15mPL
 
 // Determine LTF trends
-int ltf2hTrend = use2H ? detectTrend(nz(ltf2hPH), nz(ltf2hPL), nz(prevLtf2hPH), nz(prevLtf2hPL)) : RANGING
-int ltf1hTrend = use1H ? detectTrend(nz(ltf1hPH), nz(ltf1hPL), nz(prevLtf1hPH), nz(prevLtf1hPL)) : RANGING
-int ltf30mTrend = use30M ? detectTrend(nz(ltf30mPH), nz(ltf30mPL), nz(prevLtf30mPH), nz(prevLtf30mPL)) : RANGING
-int ltf15mTrend = use15M ? detectTrend(nz(ltf15mPH), nz(ltf15mPL), nz(prevLtf15mPH), nz(prevLtf15mPL)) : RANGING
+int ltf2hTrend = use2H ? detectTrend(nz(currentLtf2hPH), nz(currentLtf2hPL), nz(prevLtf2hPH), nz(prevLtf2hPL)) : RANGING
+int ltf1hTrend = use1H ? detectTrend(nz(currentLtf1hPH), nz(currentLtf1hPL), nz(prevLtf1hPH), nz(prevLtf1hPL)) : RANGING
+int ltf30mTrend = use30M ? detectTrend(nz(currentLtf30mPH), nz(currentLtf30mPL), nz(prevLtf30mPH), nz(prevLtf30mPL)) : RANGING
+int ltf15mTrend = use15M ? detectTrend(nz(currentLtf15mPH), nz(currentLtf15mPL), nz(prevLtf15mPH), nz(prevLtf15mPL)) : RANGING
 
 // Check alignment with HTF bias
 int ltfAlignCount = 0
@@ -348,11 +376,20 @@ if not na(srPivotH) and showLayer3
     if not merged
         ZoneInfo newZone = ZoneInfo.new(zHigh, zLow, BEARISH, 1, bar_index - srPivotLen)
         array.push(srZones, newZone)
-        // Manage zone limit
+        // Manage zone limit - evict zone furthest from current price
         if array.size(srZones) > maxZones
-            ZoneInfo oldest = array.shift(srZones)
-            if not na(oldest.boxRef)
-                box.delete(oldest.boxRef)
+            int evictIdx = 0
+            float maxDist = 0.0
+            for k = 0 to array.size(srZones) - 1
+                ZoneInfo z = array.get(srZones, k)
+                float zoneMid = (z.priceHigh + z.priceLow) / 2.0
+                float dist = math.abs(close - zoneMid)
+                if dist > maxDist
+                    maxDist := dist
+                    evictIdx := k
+            ZoneInfo evicted = array.remove(srZones, evictIdx)
+            if not na(evicted.boxRef)
+                box.delete(evicted.boxRef)
 
 // Add new support zone when pivot low detected
 if not na(srPivotL) and showLayer3
@@ -369,10 +406,20 @@ if not na(srPivotL) and showLayer3
     if not merged2
         ZoneInfo newZone2 = ZoneInfo.new(zHigh2, zLow2, BULLISH, 1, bar_index - srPivotLen)
         array.push(srZones, newZone2)
+        // Manage zone limit - evict zone furthest from current price
         if array.size(srZones) > maxZones
-            ZoneInfo oldest2 = array.shift(srZones)
-            if not na(oldest2.boxRef)
-                box.delete(oldest2.boxRef)
+            int evictIdx2 = 0
+            float maxDist2 = 0.0
+            for k = 0 to array.size(srZones) - 1
+                ZoneInfo z = array.get(srZones, k)
+                float zoneMid = (z.priceHigh + z.priceLow) / 2.0
+                float dist = math.abs(close - zoneMid)
+                if dist > maxDist2
+                    maxDist2 := dist
+                    evictIdx2 := k
+            ZoneInfo evicted2 = array.remove(srZones, evictIdx2)
+            if not na(evicted2.boxRef)
+                box.delete(evicted2.boxRef)
 
 
 // --- EQH/EQL Detection (Liquidity Pools) ---
@@ -398,35 +445,45 @@ if not na(srPivotL)
         array.shift(recentLows)
         array.shift(recentLowBars)
 
-// Detect Equal Highs (EQH) - two highs within tolerance
+// Detect Equal Highs (EQH) - compare all pairs in recent arrays
 bool eqhDetected = false
 float eqhLevel = na
 if array.size(recentHighs) >= 2
-    float lastHigh = array.get(recentHighs, array.size(recentHighs) - 1)
-    for i = 0 to array.size(recentHighs) - 2
-        float compareHigh = array.get(recentHighs, i)
-        if math.abs(lastHigh - compareHigh) / nz(lastHigh, 1.0) < EQH_EQL_TOLERANCE
-            eqhDetected := true
-            eqhLevel := math.max(lastHigh, compareHigh)
+    int hSize = array.size(recentHighs)
+    int checkCount = math.min(hSize, 5)  // Check last 5 entries against each other
+    for i = hSize - checkCount to hSize - 1
+        if eqhDetected
             break
+        float hi = array.get(recentHighs, i)
+        for j = i + 1 to hSize - 1
+            float hj = array.get(recentHighs, j)
+            if math.abs(hi - hj) / nz(hi, 1.0) < EQH_EQL_TOLERANCE
+                eqhDetected := true
+                eqhLevel := math.max(hi, hj)
+                break
 
-// Detect Equal Lows (EQL)
+// Detect Equal Lows (EQL) - compare all pairs in recent arrays
 bool eqlDetected = false
 float eqlLevel = na
 if array.size(recentLows) >= 2
-    float lastLow = array.get(recentLows, array.size(recentLows) - 1)
-    for i = 0 to array.size(recentLows) - 2
-        float compareLow = array.get(recentLows, i)
-        if math.abs(lastLow - compareLow) / nz(lastLow, 1.0) < EQH_EQL_TOLERANCE
-            eqlDetected := true
-            eqlLevel := math.min(lastLow, compareLow)
+    int lSize = array.size(recentLows)
+    int checkCountL = math.min(lSize, 5)  // Check last 5 entries against each other
+    for i = lSize - checkCountL to lSize - 1
+        if eqlDetected
             break
+        float li = array.get(recentLows, i)
+        for j = i + 1 to lSize - 1
+            float lj = array.get(recentLows, j)
+            if math.abs(li - lj) / nz(li, 1.0) < EQH_EQL_TOLERANCE
+                eqlDetected := true
+                eqlLevel := math.min(li, lj)
+                break
 
 
 // --- PDH/PDL and PWH/PWL Levels ---
 
-[prevDayHigh, prevDayLow] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_off)
-[prevWeekHigh, prevWeekLow] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+[prevDayHigh, prevDayLow] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[prevWeekHigh, prevWeekLow] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
 
 float pdh = nz(prevDayHigh)
 float pdl = nz(prevDayLow)
@@ -472,11 +529,11 @@ bool sweepLow = false
 if barstate.isconfirmed
     // Bearish sweep: wick above resistance/EQH but close below
     if wickUpRatio >= sweepWickPct
-        if (showPDHL and high > pdh and close < pdh) or (eqhDetected and not na(eqhLevel) and high > eqhLevel and close < eqhLevel)
+        if (high > pdh and close < pdh) or (eqhDetected and not na(eqhLevel) and high > eqhLevel and close < eqhLevel)
             sweepHigh := true
     // Bullish sweep: wick below support/EQL but close above
     if wickDownRatio >= sweepWickPct
-        if (showPDHL and low < pdl and close > pdl) or (eqlDetected and not na(eqlLevel) and low < eqlLevel and close > eqlLevel)
+        if (low < pdl and close > pdl) or (eqlDetected and not na(eqlLevel) and low < eqlLevel and close > eqlLevel)
             sweepLow := true
 
 
@@ -573,9 +630,41 @@ if tradeState.status == "Entry Active"
     if tradeState.direction == BULLISH
         if high >= nz(tradeState.tp1) or low <= nz(tradeState.sl)
             tradeState.status := "Idle"
+            tradeState.entry := na
+            tradeState.sl := na
+            tradeState.tp1 := na
+            tradeState.tp2 := na
+            tradeState.tp3 := na
+            tradeState.direction := 0
+            // Delete trade lines on exit
+            if not na(lineEntry)
+                line.delete(lineEntry)
+                lineEntry := na
+            if not na(lineSL)
+                line.delete(lineSL)
+                lineSL := na
+            if not na(lineTP1)
+                line.delete(lineTP1)
+                lineTP1 := na
     else if tradeState.direction == BEARISH
         if low <= nz(tradeState.tp1) or high >= nz(tradeState.sl)
             tradeState.status := "Idle"
+            tradeState.entry := na
+            tradeState.sl := na
+            tradeState.tp1 := na
+            tradeState.tp2 := na
+            tradeState.tp3 := na
+            tradeState.direction := 0
+            // Delete trade lines on exit
+            if not na(lineEntry)
+                line.delete(lineEntry)
+                lineEntry := na
+            if not na(lineSL)
+                line.delete(lineSL)
+                lineSL := na
+            if not na(lineTP1)
+                line.delete(lineTP1)
+                lineTP1 := na
 
 
 // --- Visual Drawing ---
@@ -742,13 +831,22 @@ prevLtfReady := ltfReady
 // Sweep detection alert condition
 bool sweepAlert = sweepHigh or sweepLow
 
-// Entry signal with JSON payload
+// Entry signal action for dynamic alerts
 string entryAction = entrySignal ? (tradeState.direction == BULLISH ? "BUY" : "SELL") : ""
-string jsonPayload = entrySignal ? '{"ticker":"' + syminfo.ticker + '","action":"' + entryAction + '","entry":' + str.tostring(nz(entryPrice)) + ',"sl":' + str.tostring(nz(slPrice)) + ',"tp1":' + str.tostring(nz(tp1Price)) + ',"tp2":' + str.tostring(nz(tp2Price)) + ',"tp3":' + str.tostring(nz(tp3Price)) + '}' : ""
 
-alertcondition(biasChanged and alertBiasChange, title = "HTF Bias Changed", message = "Phantom Edge: HTF Bias changed to " + (htfBias == BULLISH ? "BULLISH" : htfBias == BEARISH ? "BEARISH" : "RANGING") + " on {{ticker}}")
+// Static alertcondition() calls (compile-time constant messages only)
+alertcondition(biasChanged and alertBiasChange, title = "HTF Bias Changed", message = "Phantom Edge: HTF Bias changed on {{ticker}} at {{close}}")
 alertcondition(ltfJustAligned and alertLTFAligned, title = "LTF Aligned", message = "Phantom Edge: LTF timeframes aligned with HTF bias on {{ticker}} at {{close}}")
 alertcondition(sweepAlert and alertSweep, title = "Sweep Detected", message = "Phantom Edge: Liquidity sweep detected on {{ticker}} at {{close}}")
-alertcondition(entrySignal and alertEntry, title = "Entry Signal", message = "Phantom Edge Entry: {{ticker}} " + entryAction + " at {{close}}")
+alertcondition(entrySignal and alertEntry, title = "Entry Signal", message = "Phantom Edge: Entry signal on {{ticker}} at {{close}}")
+
+// Dynamic alert() calls for detailed JSON payloads
+if biasChanged and alertBiasChange
+    string biasStr = htfBias == BULLISH ? "BULLISH" : htfBias == BEARISH ? "BEARISH" : "RANGING"
+    alert("Phantom Edge: HTF Bias changed to " + biasStr + " on " + syminfo.ticker, alert.freq_once_per_bar)
+
+if entrySignal and alertEntry
+    string jsonPayload = '{"ticker":"' + syminfo.ticker + '","action":"' + entryAction + '","entry":' + str.tostring(nz(entryPrice)) + ',"sl":' + str.tostring(nz(slPrice)) + ',"tp1":' + str.tostring(nz(tp1Price)) + ',"tp2":' + str.tostring(nz(tp2Price)) + ',"tp3":' + str.tostring(nz(tp3Price)) + '}'
+    alert(jsonPayload, alert.freq_once_per_bar)
 
 // --- End of Script ---
