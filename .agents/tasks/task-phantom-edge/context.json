@@ -1,0 +1,16 @@
+{
+  "project_type": "Pine Script v6 TradingView trading indicator",
+  "language": "Pine Script v6",
+  "build_system": "TradingView platform (no local build - validation is syntax-based)",
+  "test_framework": "No automated test framework - Pine Script is validated by TradingView compiler. Use AST/syntax validation locally.",
+  "build_command": "N/A - Pine Script runs on TradingView. Validate syntax structure manually.",
+  "test_command": "N/A - no local test runner for Pine Script",
+  "verification_instructions": "1. Verify the file exists at indicators/phantom-edge.pine. 2. Verify it starts with //@version=6. 3. Verify it contains indicator() declaration with overlay=true. 4. Check for balanced brackets/parentheses. 5. Verify all required sections are present.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "No setup required - this is a single Pine Script file project.",
+  "environment_constraints": "No Pine Script compiler available locally. Validation is limited to syntax structure checks. No network needed for this task.",
+  "contribution_requirements": "From steering files: Use //@version=6, indicator() declaration, camelCase for variables, UPPER_SNAKE_CASE for constants, group inputs, use ta.* namespace, handle na values, use var for persistent state, avoid repainting with barstate.isconfirmed, place file in indicators/ directory with .pine extension.",
+  "key_patterns": "Pine Script v6 conventions: inputs at top grouped by category, variables before logic, plots at end, alerts after plots. Section comments with // --- Section Name --- format. Use request.security() with barmerge.lookahead_off.",
+  "relevant_files": ["indicators/phantom-edge.pine"],
+  "directory_structure": "indicators/ - indicator scripts, strategies/ - strategy scripts, libraries/ - library scripts, .kiro/steering/ - project conventions"
+}
