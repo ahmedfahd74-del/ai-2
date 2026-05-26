@@ -667,8 +667,9 @@ if tradeState.status == "Entry Active"
 // Draw S/R Zones as boxes
 if showLayer3 and array.size(srZones) > 0
     // Delete old boxes first to manage limits
-    for i = 0 to array.size(zoneBoxes) - 1
-        box.delete(array.get(zoneBoxes, i))
+    if array.size(zoneBoxes) > 0
+        for i = 0 to array.size(zoneBoxes) - 1
+            box.delete(array.get(zoneBoxes, i))
     array.clear(zoneBoxes)
 
     for i = 0 to array.size(srZones) - 1
