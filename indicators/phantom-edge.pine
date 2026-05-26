@@ -438,39 +438,31 @@ if not na(srPivotL)
         array.shift(recentLows)
         array.shift(recentLowBars)
 
-// Detect Equal Highs (EQH) - compare all pairs in recent arrays
+// Detect Equal Highs (EQH) - compare last entry against previous ones
 bool eqhDetected = false
 float eqhLevel = na
 if array.size(recentHighs) >= 2
     int hSize = array.size(recentHighs)
-    int checkCount = math.min(hSize, 5)  // Check last 5 entries against each other
-    for i = hSize - checkCount to hSize - 2
-        if eqhDetected
+    float lastH = array.get(recentHighs, hSize - 1)
+    for i = 0 to hSize - 2
+        float prevH = array.get(recentHighs, i)
+        if math.abs(lastH - prevH) / nz(lastH, 1.0) < EQH_EQL_TOLERANCE
+            eqhDetected := true
+            eqhLevel := math.max(lastH, prevH)
             break
-        float hi = array.get(recentHighs, i)
-        for j = i + 1 to hSize - 1
-            float hj = array.get(recentHighs, j)
-            if math.abs(hi - hj) / nz(hi, 1.0) < EQH_EQL_TOLERANCE
-                eqhDetected := true
-                eqhLevel := math.max(hi, hj)
-                break
 
-// Detect Equal Lows (EQL) - compare all pairs in recent arrays
+// Detect Equal Lows (EQL) - compare last entry against previous ones
 bool eqlDetected = false
 float eqlLevel = na
 if array.size(recentLows) >= 2
     int lSize = array.size(recentLows)
-    int checkCountL = math.min(lSize, 5)  // Check last 5 entries against each other
-    for i = lSize - checkCountL to lSize - 2
-        if eqlDetected
+    float lastL = array.get(recentLows, lSize - 1)
+    for i = 0 to lSize - 2
+        float prevL = array.get(recentLows, i)
+        if math.abs(lastL - prevL) / nz(lastL, 1.0) < EQH_EQL_TOLERANCE
+            eqlDetected := true
+            eqlLevel := math.min(lastL, prevL)
             break
-        float li = array.get(recentLows, i)
-        for j = i + 1 to lSize - 1
-            float lj = array.get(recentLows, j)
-            if math.abs(li - lj) / nz(li, 1.0) < EQH_EQL_TOLERANCE
-                eqlDetected := true
-                eqlLevel := math.min(li, lj)
-                break
 
 
 // --- PDH/PDL and PWH/PWL Levels ---
