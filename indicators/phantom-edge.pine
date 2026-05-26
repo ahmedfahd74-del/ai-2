@@ -444,7 +444,7 @@ float eqhLevel = na
 if array.size(recentHighs) >= 2
     int hSize = array.size(recentHighs)
     int checkCount = math.min(hSize, 5)  // Check last 5 entries against each other
-    for i = hSize - checkCount to hSize - 1
+    for i = hSize - checkCount to hSize - 2
         if eqhDetected
             break
         float hi = array.get(recentHighs, i)
@@ -461,7 +461,7 @@ float eqlLevel = na
 if array.size(recentLows) >= 2
     int lSize = array.size(recentLows)
     int checkCountL = math.min(lSize, 5)  // Check last 5 entries against each other
-    for i = lSize - checkCountL to lSize - 1
+    for i = lSize - checkCountL to lSize - 2
         if eqlDetected
             break
         float li = array.get(recentLows, i)
