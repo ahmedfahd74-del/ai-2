@@ -37,6 +37,7 @@ type ZoneData
     line topLine
     line botLine
     label lblRef
+    line centerLine
 
 // --- Global Settings ---
 
@@ -220,35 +221,29 @@ var ZoneData[] zonesL8 = array.new<ZoneData>()
 var ZoneData[] zonesL9 = array.new<ZoneData>()
 var ZoneData[] zonesL10 = array.new<ZoneData>()
 
-// --- Alert State Variables ---
-
-var bool alertZoneTouch = false
-var bool alertZoneMitigated = false
-var bool alertNewZone = false
-
 // --- Request Security Calls (top-level, one per level) ---
 // Each call fetches: [pivotHigh, pivotLow, volume, volumeSma20, atr50]
 // Using tuple returns to minimize total security calls (10 total)
 
-[phL1, plL1, volL1, volSmaL1, atrL1] = request.security(syminfo.tickerid, tfL1, [ta.pivothigh(high, swingLenL1, swingLenL1), ta.pivotlow(low, swingLenL1, swingLenL1), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+[phL1, plL1, volL1, volSmaL1, atrL1] = request.security(syminfo.tickerid, tfL1, [ta.pivothigh(high, swingLenL1, swingLenL1), ta.pivotlow(low, swingLenL1, swingLenL1), volume[swingLenL1], ta.sma(volume, 20)[swingLenL1], ta.atr(50)], lookahead = barmerge.lookahead_off)
 
-[phL2, plL2, volL2, volSmaL2, atrL2] = request.security(syminfo.tickerid, tfL2, [ta.pivothigh(high, swingLenL2, swingLenL2), ta.pivotlow(low, swingLenL2, swingLenL2), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+[phL2, plL2, volL2, volSmaL2, atrL2] = request.security(syminfo.tickerid, tfL2, [ta.pivothigh(high, swingLenL2, swingLenL2), ta.pivotlow(low, swingLenL2, swingLenL2), volume[swingLenL2], ta.sma(volume, 20)[swingLenL2], ta.atr(50)], lookahead = barmerge.lookahead_off)
 
-[phL3, plL3, volL3, volSmaL3, atrL3] = request.security(syminfo.tickerid, tfL3, [ta.pivothigh(high, swingLenL3, swingLenL3), ta.pivotlow(low, swingLenL3, swingLenL3), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+[phL3, plL3, volL3, volSmaL3, atrL3] = request.security(syminfo.tickerid, tfL3, [ta.pivothigh(high, swingLenL3, swingLenL3), ta.pivotlow(low, swingLenL3, swingLenL3), volume[swingLenL3], ta.sma(volume, 20)[swingLenL3], ta.atr(50)], lookahead = barmerge.lookahead_off)
 
-[phL4, plL4, volL4, volSmaL4, atrL4] = request.security(syminfo.tickerid, tfL4, [ta.pivothigh(high, swingLenL4, swingLenL4), ta.pivotlow(low, swingLenL4, swingLenL4), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+[phL4, plL4, volL4, volSmaL4, atrL4] = request.security(syminfo.tickerid, tfL4, [ta.pivothigh(high, swingLenL4, swingLenL4), ta.pivotlow(low, swingLenL4, swingLenL4), volume[swingLenL4], ta.sma(volume, 20)[swingLenL4], ta.atr(50)], lookahead = barmerge.lookahead_off)
 
-[phL5, plL5, volL5, volSmaL5, atrL5] = request.security(syminfo.tickerid, tfL5, [ta.pivothigh(high, swingLenL5, swingLenL5), ta.pivotlow(low, swingLenL5, swingLenL5), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+[phL5, plL5, volL5, volSmaL5, atrL5] = request.security(syminfo.tickerid, tfL5, [ta.pivothigh(high, swingLenL5, swingLenL5), ta.pivotlow(low, swingLenL5, swingLenL5), volume[swingLenL5], ta.sma(volume, 20)[swingLenL5], ta.atr(50)], lookahead = barmerge.lookahead_off)
 
-[phL6, plL6, volL6, volSmaL6, atrL6] = request.security(syminfo.tickerid, tfL6, [ta.pivothigh(high, swingLenL6, swingLenL6), ta.pivotlow(low, swingLenL6, swingLenL6), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+[phL6, plL6, volL6, volSmaL6, atrL6] = request.security(syminfo.tickerid, tfL6, [ta.pivothigh(high, swingLenL6, swingLenL6), ta.pivotlow(low, swingLenL6, swingLenL6), volume[swingLenL6], ta.sma(volume, 20)[swingLenL6], ta.atr(50)], lookahead = barmerge.lookahead_off)
 
-[phL7, plL7, volL7, volSmaL7, atrL7] = request.security(syminfo.tickerid, tfL7, [ta.pivothigh(high, swingLenL7, swingLenL7), ta.pivotlow(low, swingLenL7, swingLenL7), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+[phL7, plL7, volL7, volSmaL7, atrL7] = request.security(syminfo.tickerid, tfL7, [ta.pivothigh(high, swingLenL7, swingLenL7), ta.pivotlow(low, swingLenL7, swingLenL7), volume[swingLenL7], ta.sma(volume, 20)[swingLenL7], ta.atr(50)], lookahead = barmerge.lookahead_off)
 
-[phL8, plL8, volL8, volSmaL8, atrL8] = request.security(syminfo.tickerid, tfL8, [ta.pivothigh(high, swingLenL8, swingLenL8), ta.pivotlow(low, swingLenL8, swingLenL8), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+[phL8, plL8, volL8, volSmaL8, atrL8] = request.security(syminfo.tickerid, tfL8, [ta.pivothigh(high, swingLenL8, swingLenL8), ta.pivotlow(low, swingLenL8, swingLenL8), volume[swingLenL8], ta.sma(volume, 20)[swingLenL8], ta.atr(50)], lookahead = barmerge.lookahead_off)
 
-[phL9, plL9, volL9, volSmaL9, atrL9] = request.security(syminfo.tickerid, tfL9, [ta.pivothigh(high, swingLenL9, swingLenL9), ta.pivotlow(low, swingLenL9, swingLenL9), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+[phL9, plL9, volL9, volSmaL9, atrL9] = request.security(syminfo.tickerid, tfL9, [ta.pivothigh(high, swingLenL9, swingLenL9), ta.pivotlow(low, swingLenL9, swingLenL9), volume[swingLenL9], ta.sma(volume, 20)[swingLenL9], ta.atr(50)], lookahead = barmerge.lookahead_off)
 
-[phL10, plL10, volL10, volSmaL10, atrL10] = request.security(syminfo.tickerid, tfL10, [ta.pivothigh(high, swingLenL10, swingLenL10), ta.pivotlow(low, swingLenL10, swingLenL10), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+[phL10, plL10, volL10, volSmaL10, atrL10] = request.security(syminfo.tickerid, tfL10, [ta.pivothigh(high, swingLenL10, swingLenL10), ta.pivotlow(low, swingLenL10, swingLenL10), volume[swingLenL10], ta.sma(volume, 20)[swingLenL10], ta.atr(50)], lookahead = barmerge.lookahead_off)
 
 // --- Helper: Convert Timeframe to Human-Readable Label ---
 
@@ -312,8 +307,10 @@ processLevel(bool enable, float pivotHigh, float pivotLow, float vol, float volS
                         line.delete(removed.botLine)
                     if not na(removed.lblRef)
                         label.delete(removed.lblRef)
+                    if not na(removed.centerLine)
+                        line.delete(removed.centerLine)
                 // Create new resistance zone
-                ZoneData newZone = ZoneData.new(zHigh, zLow, -1, bar_index, 0, bar_index, na, na, na, na)
+                ZoneData newZone = ZoneData.new(zHigh, zLow, -1, bar_index, 0, bar_index, na, na, na, na, na)
                 array.push(zones, newZone)
                 newZoneFlag := true
 
@@ -352,8 +349,10 @@ processLevel(bool enable, float pivotHigh, float pivotLow, float vol, float volS
                         line.delete(removed.botLine)
                     if not na(removed.lblRef)
                         label.delete(removed.lblRef)
+                    if not na(removed.centerLine)
+                        line.delete(removed.centerLine)
                 // Create new support zone
-                ZoneData newZone = ZoneData.new(zHighS, zLowS, 1, bar_index, 0, bar_index, na, na, na, na)
+                ZoneData newZone = ZoneData.new(zHighS, zLowS, 1, bar_index, 0, bar_index, na, na, na, na, na)
                 array.push(zones, newZone)
                 newZoneFlag := true
 
@@ -383,12 +382,14 @@ processLevel(bool enable, float pivotHigh, float pivotLow, float vol, float volS
                         line.delete(zone.botLine)
                     if not na(zone.lblRef)
                         label.delete(zone.lblRef)
+                    if not na(zone.centerLine)
+                        line.delete(zone.centerLine)
                     array.remove(zones, idx)
                     mitigatedFlag := true
             idx -= 1
 
     // --- Zone Touch Detection ---
-    if enable and array.size(zones) > 0
+    if enable and barstate.isconfirmed and array.size(zones) > 0
         for i = 0 to array.size(zones) - 1
             ZoneData zone = array.get(zones, i)
             if high >= zone.priceLow and low <= zone.priceHigh
@@ -457,7 +458,9 @@ drawCenterlines(bool enable, bool showCenterlines, ZoneData[] zones, color edgeC
         for i = 0 to array.size(zones) - 1
             ZoneData zone = array.get(zones, i)
             float mid = (zone.priceHigh + zone.priceLow) / 2.0
-            line.new(bar_index - 1, mid, bar_index, mid, xloc = xloc.bar_index, extend = extend.both, color = color.new(edgeColor, 50), style = line.style_dotted, width = 1)
+            if not na(zone.centerLine)
+                line.delete(zone.centerLine)
+            zone.centerLine := line.new(bar_index - 1, mid, bar_index, mid, xloc = xloc.bar_index, extend = extend.both, color = color.new(edgeColor, 50), style = line.style_dotted, width = 1)
 
 drawCenterlines(enableL1, showPOICenterlines, zonesL1, colorEdgeL1)
 drawCenterlines(enableL2, showPOICenterlines, zonesL2, colorEdgeL2)
