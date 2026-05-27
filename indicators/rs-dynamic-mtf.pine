@@ -416,8 +416,9 @@ processLevel(bool enable, float pivotHigh, float pivotLow, float vol, float volS
                 line.delete(zone.botLine)
             if not na(zone.lblRef)
                 label.delete(zone.lblRef)
-            // Draw box (zone fill)
-            zone.boxRef := box.new(zone.birthBarIndex, zone.priceHigh, bar_index + extBars, zone.priceLow, border_color = color.new(colorEdge, 0), border_width = 1, bgcolor = fillColor, xloc = xloc.bar_index)
+            // Draw box (zone fill) - clamp left edge to max 500 bars back to avoid TradingView limit
+            int safeLeft = math.max(zone.birthBarIndex, bar_index - 500)
+            zone.boxRef := box.new(safeLeft, zone.priceHigh, bar_index + extBars, zone.priceLow, border_color = color.new(colorEdge, 0), border_width = 1, bgcolor = fillColor, xloc = xloc.bar_index)
             // Draw top and bottom boundary lines (extend.both)
             zone.topLine := line.new(bar_index - 1, zone.priceHigh, bar_index, zone.priceHigh, xloc = xloc.bar_index, extend = extend.both, color = colorEdge, style = line.style_solid, width = 1)
             zone.botLine := line.new(bar_index - 1, zone.priceLow, bar_index, zone.priceLow, xloc = xloc.bar_index, extend = extend.both, color = colorEdge, style = line.style_solid, width = 1)
