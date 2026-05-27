@@ -156,18 +156,19 @@ var bool prevLtfReady = false
 // Get ATR value for zone thickness calculation
 atrVal = ta.atr(14)
 
-// Determine pivot-based trend from security data
-detectTrend(float ph, float pl, float prevPH, float prevPL) =>
+// Determine trend from valuewhen pivots + EMA fallback
+detectTrendHTF(float lastPH, float prevPH, float lastPL, float prevPL, float htfClose, float htfEma) =>
     int result = RANGING
-    if not na(ph) and not na(pl) and not na(prevPH) and not na(prevPL)
-        bool higherHigh = ph > prevPH
-        bool higherLow = pl > prevPL
-        bool lowerHigh = ph < prevPH
-        bool lowerLow = pl < prevPL
-        if higherHigh and higherLow
+    bool hasPivots = not na(lastPH) and not na(prevPH) and not na(lastPL) and not na(prevPL)
+    if hasPivots
+        if lastPH > prevPH and lastPL > prevPL
             result := BULLISH
-        else if lowerHigh and lowerLow
+        else if lastPH < prevPH and lastPL < prevPL
             result := BEARISH
+        else if not na(htfClose) and not na(htfEma)
+            result := htfClose > htfEma ? BULLISH : BEARISH
+    else if not na(htfClose) and not na(htfEma)
+        result := htfClose > htfEma ? BULLISH : BEARISH
     result
 
 // Kill zone check
@@ -183,60 +184,19 @@ isInKillZone() =>
 
 // --- Layer 1: HTF Bias (WHERE) ---
 
-// Pivot detection function for security context
-pivotHigh(int len) =>
-    ta.pivothigh(high, len, len)
+// Weekly data via valuewhen pivots + EMA
+[wClose, wEma, wLastPH, wPrevPH, wLastPL, wPrevPL] = request.security(syminfo.tickerid, "W", [close, ta.ema(close, 21), ta.valuewhen(not na(ta.pivothigh(high, htfPivotLen, htfPivotLen)), ta.pivothigh(high, htfPivotLen, htfPivotLen), 0), ta.valuewhen(not na(ta.pivothigh(high, htfPivotLen, htfPivotLen)), ta.pivothigh(high, htfPivotLen, htfPivotLen), 1), ta.valuewhen(not na(ta.pivotlow(low, htfPivotLen, htfPivotLen)), ta.pivotlow(low, htfPivotLen, htfPivotLen), 0), ta.valuewhen(not na(ta.pivotlow(low, htfPivotLen, htfPivotLen)), ta.pivotlow(low, htfPivotLen, htfPivotLen), 1)], lookahead = barmerge.lookahead_off)
 
-pivotLow(int len) =>
-    ta.pivotlow(low, len, len)
+// Daily data via valuewhen pivots + EMA
+[dClose, dEma, dLastPH, dPrevPH, dLastPL, dPrevPL] = request.security(syminfo.tickerid, "D", [close, ta.ema(close, 21), ta.valuewhen(not na(ta.pivothigh(high, htfPivotLen, htfPivotLen)), ta.pivothigh(high, htfPivotLen, htfPivotLen), 0), ta.valuewhen(not na(ta.pivothigh(high, htfPivotLen, htfPivotLen)), ta.pivothigh(high, htfPivotLen, htfPivotLen), 1), ta.valuewhen(not na(ta.pivotlow(low, htfPivotLen, htfPivotLen)), ta.pivotlow(low, htfPivotLen, htfPivotLen), 0), ta.valuewhen(not na(ta.pivotlow(low, htfPivotLen, htfPivotLen)), ta.pivotlow(low, htfPivotLen, htfPivotLen), 1)], lookahead = barmerge.lookahead_off)
 
-// Weekly pivot data
-[wPH, wPL] = request.security(syminfo.tickerid, "W", [pivotHigh(htfPivotLen), pivotLow(htfPivotLen)], lookahead = barmerge.lookahead_off)
-
-// Daily pivot data
-[dPH, dPL] = request.security(syminfo.tickerid, "D", [pivotHigh(htfPivotLen), pivotLow(htfPivotLen)], lookahead = barmerge.lookahead_off)
-
-// 4H pivot data
-[h4PH, h4PL] = request.security(syminfo.tickerid, "240", [pivotHigh(htfPivotLen), pivotLow(htfPivotLen)], lookahead = barmerge.lookahead_off)
-
-// Track current and previous pivots for trend detection using var
-var float currentWPH = na
-var float currentWPL = na
-var float currentDPH = na
-var float currentDPL = na
-var float current4HPH = na
-var float current4HPL = na
-var float prevWPH = na
-var float prevWPL = na
-var float prevDPH = na
-var float prevDPL = na
-var float prev4HPH = na
-var float prev4HPL = na
-
-// Update previous pivots when new ones form (shift old current into prev, then update current)
-if not na(wPH) and wPH != currentWPH
-    prevWPH := currentWPH
-    currentWPH := wPH
-if not na(wPL) and wPL != currentWPL
-    prevWPL := currentWPL
-    currentWPL := wPL
-if not na(dPH) and dPH != currentDPH
-    prevDPH := currentDPH
-    currentDPH := dPH
-if not na(dPL) and dPL != currentDPL
-    prevDPL := currentDPL
-    currentDPL := dPL
-if not na(h4PH) and h4PH != current4HPH
-    prev4HPH := current4HPH
-    current4HPH := h4PH
-if not na(h4PL) and h4PL != current4HPL
-    prev4HPL := current4HPL
-    current4HPL := h4PL
+// 4H data via valuewhen pivots + EMA
+[h4Close, h4Ema, h4LastPH, h4PrevPH, h4LastPL, h4PrevPL] = request.security(syminfo.tickerid, "240", [close, ta.ema(close, 21), ta.valuewhen(not na(ta.pivothigh(high, htfPivotLen, htfPivotLen)), ta.pivothigh(high, htfPivotLen, htfPivotLen), 0), ta.valuewhen(not na(ta.pivothigh(high, htfPivotLen, htfPivotLen)), ta.pivothigh(high, htfPivotLen, htfPivotLen), 1), ta.valuewhen(not na(ta.pivotlow(low, htfPivotLen, htfPivotLen)), ta.pivotlow(low, htfPivotLen, htfPivotLen), 0), ta.valuewhen(not na(ta.pivotlow(low, htfPivotLen, htfPivotLen)), ta.pivotlow(low, htfPivotLen, htfPivotLen), 1)], lookahead = barmerge.lookahead_off)
 
 // Determine trend for each HTF
-int weeklyTrend = useWeekly ? detectTrend(currentWPH, currentWPL, prevWPH, prevWPL) : RANGING
-int dailyTrend = useDaily ? detectTrend(currentDPH, currentDPL, prevDPH, prevDPL) : RANGING
-int h4Trend = use4H ? detectTrend(current4HPH, current4HPL, prev4HPH, prev4HPL) : RANGING
+int weeklyTrend = useWeekly ? detectTrendHTF(wLastPH, wPrevPH, wLastPL, wPrevPL, wClose, wEma) : RANGING
+int dailyTrend = useDaily ? detectTrendHTF(dLastPH, dPrevPH, dLastPL, dPrevPL, dClose, dEma) : RANGING
+int h4Trend = use4H ? detectTrendHTF(h4LastPH, h4PrevPH, h4LastPL, h4PrevPL, h4Close, h4Ema) : RANGING
 
 // 2-of-3 consensus for HTF bias
 int bullCount = (weeklyTrend == BULLISH ? 1 : 0) + (dailyTrend == BULLISH ? 1 : 0) + (h4Trend == BULLISH ? 1 : 0)
@@ -253,66 +213,23 @@ bool inDiscount = close < dailyMid
 
 // --- Layer 2: LTF Alignment (WHEN) ---
 
-// 2H pivot data
-[ltf2hPH, ltf2hPL] = request.security(syminfo.tickerid, "120", [pivotHigh(ltfPivotLen), pivotLow(ltfPivotLen)], lookahead = barmerge.lookahead_off)
+// 2H data via valuewhen pivots + EMA
+[ltf2hClose, ltf2hEma, ltf2hLastPH, ltf2hPrevPH, ltf2hLastPL, ltf2hPrevPL] = request.security(syminfo.tickerid, "120", [close, ta.ema(close, 21), ta.valuewhen(not na(ta.pivothigh(high, ltfPivotLen, ltfPivotLen)), ta.pivothigh(high, ltfPivotLen, ltfPivotLen), 0), ta.valuewhen(not na(ta.pivothigh(high, ltfPivotLen, ltfPivotLen)), ta.pivothigh(high, ltfPivotLen, ltfPivotLen), 1), ta.valuewhen(not na(ta.pivotlow(low, ltfPivotLen, ltfPivotLen)), ta.pivotlow(low, ltfPivotLen, ltfPivotLen), 0), ta.valuewhen(not na(ta.pivotlow(low, ltfPivotLen, ltfPivotLen)), ta.pivotlow(low, ltfPivotLen, ltfPivotLen), 1)], lookahead = barmerge.lookahead_off)
 
-// 1H pivot data
-[ltf1hPH, ltf1hPL] = request.security(syminfo.tickerid, "60", [pivotHigh(ltfPivotLen), pivotLow(ltfPivotLen)], lookahead = barmerge.lookahead_off)
+// 1H data via valuewhen pivots + EMA
+[ltf1hClose, ltf1hEma, ltf1hLastPH, ltf1hPrevPH, ltf1hLastPL, ltf1hPrevPL] = request.security(syminfo.tickerid, "60", [close, ta.ema(close, 21), ta.valuewhen(not na(ta.pivothigh(high, ltfPivotLen, ltfPivotLen)), ta.pivothigh(high, ltfPivotLen, ltfPivotLen), 0), ta.valuewhen(not na(ta.pivothigh(high, ltfPivotLen, ltfPivotLen)), ta.pivothigh(high, ltfPivotLen, ltfPivotLen), 1), ta.valuewhen(not na(ta.pivotlow(low, ltfPivotLen, ltfPivotLen)), ta.pivotlow(low, ltfPivotLen, ltfPivotLen), 0), ta.valuewhen(not na(ta.pivotlow(low, ltfPivotLen, ltfPivotLen)), ta.pivotlow(low, ltfPivotLen, ltfPivotLen), 1)], lookahead = barmerge.lookahead_off)
 
-// 30M pivot data
-[ltf30mPH, ltf30mPL] = request.security(syminfo.tickerid, "30", [pivotHigh(ltfPivotLen), pivotLow(ltfPivotLen)], lookahead = barmerge.lookahead_off)
+// 30M data via valuewhen pivots + EMA
+[ltf30mClose, ltf30mEma, ltf30mLastPH, ltf30mPrevPH, ltf30mLastPL, ltf30mPrevPL] = request.security(syminfo.tickerid, "30", [close, ta.ema(close, 21), ta.valuewhen(not na(ta.pivothigh(high, ltfPivotLen, ltfPivotLen)), ta.pivothigh(high, ltfPivotLen, ltfPivotLen), 0), ta.valuewhen(not na(ta.pivothigh(high, ltfPivotLen, ltfPivotLen)), ta.pivothigh(high, ltfPivotLen, ltfPivotLen), 1), ta.valuewhen(not na(ta.pivotlow(low, ltfPivotLen, ltfPivotLen)), ta.pivotlow(low, ltfPivotLen, ltfPivotLen), 0), ta.valuewhen(not na(ta.pivotlow(low, ltfPivotLen, ltfPivotLen)), ta.pivotlow(low, ltfPivotLen, ltfPivotLen), 1)], lookahead = barmerge.lookahead_off)
 
-// 15M pivot data
-[ltf15mPH, ltf15mPL] = request.security(syminfo.tickerid, "15", [pivotHigh(ltfPivotLen), pivotLow(ltfPivotLen)], lookahead = barmerge.lookahead_off)
-
-// Track current and previous LTF pivots
-var float currentLtf2hPH = na
-var float currentLtf2hPL = na
-var float currentLtf1hPH = na
-var float currentLtf1hPL = na
-var float currentLtf30mPH = na
-var float currentLtf30mPL = na
-var float currentLtf15mPH = na
-var float currentLtf15mPL = na
-var float prevLtf2hPH = na
-var float prevLtf2hPL = na
-var float prevLtf1hPH = na
-var float prevLtf1hPL = na
-var float prevLtf30mPH = na
-var float prevLtf30mPL = na
-var float prevLtf15mPH = na
-var float prevLtf15mPL = na
-
-if not na(ltf2hPH) and ltf2hPH != currentLtf2hPH
-    prevLtf2hPH := currentLtf2hPH
-    currentLtf2hPH := ltf2hPH
-if not na(ltf2hPL) and ltf2hPL != currentLtf2hPL
-    prevLtf2hPL := currentLtf2hPL
-    currentLtf2hPL := ltf2hPL
-if not na(ltf1hPH) and ltf1hPH != currentLtf1hPH
-    prevLtf1hPH := currentLtf1hPH
-    currentLtf1hPH := ltf1hPH
-if not na(ltf1hPL) and ltf1hPL != currentLtf1hPL
-    prevLtf1hPL := currentLtf1hPL
-    currentLtf1hPL := ltf1hPL
-if not na(ltf30mPH) and ltf30mPH != currentLtf30mPH
-    prevLtf30mPH := currentLtf30mPH
-    currentLtf30mPH := ltf30mPH
-if not na(ltf30mPL) and ltf30mPL != currentLtf30mPL
-    prevLtf30mPL := currentLtf30mPL
-    currentLtf30mPL := ltf30mPL
-if not na(ltf15mPH) and ltf15mPH != currentLtf15mPH
-    prevLtf15mPH := currentLtf15mPH
-    currentLtf15mPH := ltf15mPH
-if not na(ltf15mPL) and ltf15mPL != currentLtf15mPL
-    prevLtf15mPL := currentLtf15mPL
-    currentLtf15mPL := ltf15mPL
+// 15M data via valuewhen pivots + EMA
+[ltf15mClose, ltf15mEma, ltf15mLastPH, ltf15mPrevPH, ltf15mLastPL, ltf15mPrevPL] = request.security(syminfo.tickerid, "15", [close, ta.ema(close, 21), ta.valuewhen(not na(ta.pivothigh(high, ltfPivotLen, ltfPivotLen)), ta.pivothigh(high, ltfPivotLen, ltfPivotLen), 0), ta.valuewhen(not na(ta.pivothigh(high, ltfPivotLen, ltfPivotLen)), ta.pivothigh(high, ltfPivotLen, ltfPivotLen), 1), ta.valuewhen(not na(ta.pivotlow(low, ltfPivotLen, ltfPivotLen)), ta.pivotlow(low, ltfPivotLen, ltfPivotLen), 0), ta.valuewhen(not na(ta.pivotlow(low, ltfPivotLen, ltfPivotLen)), ta.pivotlow(low, ltfPivotLen, ltfPivotLen), 1)], lookahead = barmerge.lookahead_off)
 
 // Determine LTF trends
-int ltf2hTrend = use2H ? detectTrend(currentLtf2hPH, currentLtf2hPL, prevLtf2hPH, prevLtf2hPL) : RANGING
-int ltf1hTrend = use1H ? detectTrend(currentLtf1hPH, currentLtf1hPL, prevLtf1hPH, prevLtf1hPL) : RANGING
-int ltf30mTrend = use30M ? detectTrend(currentLtf30mPH, currentLtf30mPL, prevLtf30mPH, prevLtf30mPL) : RANGING
-int ltf15mTrend = use15M ? detectTrend(currentLtf15mPH, currentLtf15mPL, prevLtf15mPH, prevLtf15mPL) : RANGING
+int ltf2hTrend = use2H ? detectTrendHTF(ltf2hLastPH, ltf2hPrevPH, ltf2hLastPL, ltf2hPrevPL, ltf2hClose, ltf2hEma) : RANGING
+int ltf1hTrend = use1H ? detectTrendHTF(ltf1hLastPH, ltf1hPrevPH, ltf1hLastPL, ltf1hPrevPL, ltf1hClose, ltf1hEma) : RANGING
+int ltf30mTrend = use30M ? detectTrendHTF(ltf30mLastPH, ltf30mPrevPH, ltf30mLastPL, ltf30mPrevPL, ltf30mClose, ltf30mEma) : RANGING
+int ltf15mTrend = use15M ? detectTrendHTF(ltf15mLastPH, ltf15mPrevPH, ltf15mLastPL, ltf15mPrevPL, ltf15mClose, ltf15mEma) : RANGING
 
 // Check alignment with HTF bias
 int ltfAlignCount = 0
