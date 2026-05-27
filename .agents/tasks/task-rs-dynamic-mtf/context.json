@@ -1,0 +1,20 @@
+{
+  "project_type": "Pine Script v6 TradingView indicator collection",
+  "language": "Pine Script v6",
+  "build_system": "None - TradingView compiles scripts directly. Validation is syntactic review only.",
+  "test_framework": "No automated tests - scripts are validated by TradingView compiler. Manual review for syntax correctness.",
+  "build_command": "N/A - no local build toolchain for Pine Script",
+  "test_command": "N/A - scripts validated by TradingView compiler only",
+  "verification_instructions": "1. Review the script for Pine Script v6 syntax correctness. 2. Check that all required features are present. 3. Verify the script follows conventions in .kiro/steering/pine-script.md. 4. Confirm file is placed in indicators/ directory with .pine extension.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "No setup required - this is a Pine Script project with no local dependencies.",
+  "environment_constraints": "No local Pine Script compiler available. Validation is code review and AST-level correctness only. Cannot execute or test Pine Script locally.",
+  "contribution_requirements": "Use Pine Script v6 (//@version=6). Follow naming conventions (camelCase for vars, UPPER_SNAKE_CASE for constants). Place indicators in indicators/ directory with kebab-case .pine filenames. Use section comments (// --- Section Name ---). Inputs at top after indicator declaration. Plots/alerts at end.",
+  "key_patterns": "UDTs (User Defined Types) for structured data. var keyword for persistent state. Arrays for dynamic collections. request.security() with barmerge.lookahead_off for non-repainting MTF data. Input groups with string GRP_NAME pattern. Extensive use of color.new() for transparency. box/line/label drawing objects for visual zones.",
+  "relevant_files": [
+    "indicators/phantom-edge.pine",
+    ".kiro/steering/pine-script.md",
+    ".kiro/steering/project-info.md"
+  ],
+  "directory_structure": "indicators/ - Pine Script indicator files (.pine). .kiro/steering/ - project conventions and rules."
+}

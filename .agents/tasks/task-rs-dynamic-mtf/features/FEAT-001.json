@@ -1,0 +1,47 @@
+{
+  "id": "FEAT-001",
+  "type": "feat",
+  "description": "Create the full R&S Dynamic MTF [10-Layer] Pine Script v6 indicator at indicators/rs-dynamic-mtf.pine. This is a standalone indicator implementing 10 independent S/R zone layers with per-layer MTF swing detection, volume validation, ATR-based zone thickness, overlap prevention, 3-strike mitigation, and alpha decay.",
+  "status": "in_progress",
+  "steps": [
+    "Create file at indicators/rs-dynamic-mtf.pine with //@version=6 and indicator('R&S Dynamic MTF [10-Layer]', overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)",
+    "Define the UDT (User Defined Type) for zones: type ZoneData with fields: float priceHigh, float priceLow, int direction (1=support, -1=resistance), int birthBar, int strikes, int birthBarIndex, box boxRef, line topLine, line botLine, label lblRef",
+    "Create Group '0. Global Settings' inputs: extendBarsRight (int, default 50), showTextLabels (bool, default true), showPOICenterlines (bool, default true), decayBars (int, default 100), maxStrikes (int, default 3)",
+    "Create 10 input groups ('1. Level 1' through '10. Level 10') each with: enable (bool), timeframe (timeframe selector), maxZones (int), minDistAtr (float), zoneThicknessAtr (float), swingLength (int), colorResFill (color), colorSupFill (color), colorEdge (color), useVolumeFilter (bool), useMitigation (bool), useAlphaDecay (bool). Default timeframes: 'W','D','240','120','60','30','15','5','3','1'. Default enables: levels 1-3 on, 4-10 off. Default maxZones: 3,5,5,8,8,10,10,12,12,15. Default colors should progress through a spectrum (Level 1: dark red/dark green, Level 2: lighter red/green, Level 3: orange/teal, etc.). Use unique color per level for edges.",
+    "Create a reusable function processLevel(enable, tf, maxZonesLvl, minDistAtr, thicknessAtr, swingLen, colorRes, colorSup, colorEdge, useVolFilter, useMitig, useDecay, zones, extBars, showLabels, showCenterlines, decayBarsGlobal, maxStrikesGlobal, levelNum) that: (a) uses request.security() with barmerge.lookahead_off to fetch ta.pivothigh, ta.pivotlow, volume, ta.sma(volume,20), ta.atr(50) from the given timeframe; (b) detects new swing highs/lows; (c) validates with volume filter if enabled; (d) creates zones with ATR-based thickness; (e) checks overlap prevention (min distance in ATR multiples from existing zones in same level); (f) manages zone array size (oldest removed when exceeding maxZones); (g) handles mitigation - on barstate.isconfirmed, checks if price broke through zone, increments strikes, purges at maxStrikes; (h) applies alpha decay - calculates transparency based on age vs decayBars; (i) draws/updates boxes, lines (extend.both), and labels for each zone; (j) returns alert flags for zone touch, mitigation, and new zone creation",
+    "IMPORTANT: Pine Script does NOT allow request.security() inside local function scope. Instead, make all 10 request.security() calls at the top level (one per level), fetching [pivotHigh, pivotLow, vol, volSma, atrValue] tuples. Then pass these fetched values into the processLevel function. The function handles zone logic and drawing but NOT the security calls.",
+    "Call processLevel 10 times in sequence (once per level), passing each level's inputs, fetched MTF data, and its own persistent var array of ZoneData. Each level maintains its own var array declared at top level.",
+    "Implement zone text labels showing level/TF info (e.g., 'R [1W]' for resistance from weekly, 'S [4H]' for support from 4H). Only show if showTextLabels is true.",
+    "Implement POI centerlines (dotted line at zone midpoint) if showPOICenterlines is true. These use the level's edge color.",
+    "Add alertcondition() calls: 'Zone Touch' (price touches any zone boundary), 'Zone Mitigated' (a zone gets purged after max strikes), 'New Zone Created' (new S/R zone forms). Also add dynamic alert() calls with descriptive messages including ticker and level info.",
+    "Ensure total object usage stays within TradingView limits: ~125 zones max across all levels. Each zone = 1 box + 2 lines + optionally 1 label. With 500 max each, budget is safe if total zones across all levels stays under ~125 (controlled by per-level maxZones adding up).",
+    "Follow all conventions from .kiro/steering/pine-script.md: camelCase variables, UPPER_SNAKE_CASE constants, section comments (// --- Section ---), inputs at top, plots/alerts at end, proper na handling, var for persistent state.",
+    "Add header comment block explaining the script purpose, features, and version."
+  ],
+  "acceptance_criteria": [
+    "File exists at indicators/rs-dynamic-mtf.pine",
+    "Script starts with //@version=6 and uses indicator() with overlay=true and max object counts of 500",
+    "10 input groups exist (Level 1 through Level 10) each with all specified parameters",
+    "Global settings group exists with extendBarsRight, showTextLabels, showPOICenterlines, decayBars, maxStrikes",
+    "UDT ZoneData is defined with all required fields",
+    "10 request.security() call sets exist (one per level) fetching pivot/volume/ATR data from each level's timeframe",
+    "A reusable processLevel function handles zone detection, validation, overlap, mitigation, decay, and drawing",
+    "Volume validation logic exists (pivot volume > SMA volume) and is toggleable per level",
+    "Mitigation logic exists (strike counting on zone breach, purge at maxStrikes) using barstate.isconfirmed",
+    "Alpha decay logic exists (transparency increases with zone age relative to decayBars)",
+    "Overlap prevention logic exists (new zones must be minDistAtr away from existing same-level zones)",
+    "Zone extension uses extend.both for boundary lines",
+    "Text labels show level/TF info (e.g., 'R [1W]', 'S [4H]')",
+    "Alert conditions defined for zone touch, mitigation, and new zone creation",
+    "Code uses camelCase naming, section comments, and follows Pine Script v6 steering conventions",
+    "Default colors progress through a visual spectrum across the 10 levels"
+  ],
+  "verification": [
+    "Read the generated file and verify it contains all required sections: header, indicator declaration, UDT, global inputs, 10 level input groups, security calls, processLevel function, 10 processLevel invocations, alerts",
+    "Verify the script follows Pine Script v6 syntax (no v5/v4 patterns like study(), security() without request. prefix, etc.)",
+    "Verify no request.security() calls inside function bodies",
+    "Count input groups to confirm all 10 levels plus global settings are present"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

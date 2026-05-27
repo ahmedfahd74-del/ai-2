@@ -1,0 +1,494 @@
+// ============================================================================
+// R&S Dynamic MTF [10-Layer] - Multi-Timeframe Support & Resistance System
+// ============================================================================
+// A comprehensive Pine Script v6 indicator implementing 10 independent S/R
+// zone layers with per-layer multi-timeframe swing detection, volume
+// validation, ATR-based zone thickness, overlap prevention, 3-strike
+// mitigation, and alpha decay.
+//
+// Features:
+//   - 10 independent layers, each with its own timeframe and settings
+//   - Swing-based zone detection with volume confirmation
+//   - ATR-adaptive zone thickness
+//   - Overlap prevention (minimum ATR distance between same-level zones)
+//   - Strike-based mitigation (zones removed after N breaches)
+//   - Alpha decay (zones fade over time)
+//   - Extend-both boundary lines for full visibility
+//   - Per-level color coding with spectral progression
+//   - POI centerlines at zone midpoints
+//   - Alert conditions for zone touch, mitigation, and creation
+//
+// Version: 1.0
+// ============================================================================
+
+//@version=6
+indicator('R&S Dynamic MTF [10-Layer]', overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// --- User Defined Types ---
+
+type ZoneData
+    float priceHigh
+    float priceLow
+    int direction       // 1 = support, -1 = resistance
+    int birthBar
+    int strikes
+    int birthBarIndex
+    box boxRef
+    line topLine
+    line botLine
+    label lblRef
+
+// --- Global Settings ---
+
+string GRP_GLOBAL = "0. Global Settings"
+int extendBarsRight = input.int(50, "Extend Bars Right", minval = 1, maxval = 500, group = GRP_GLOBAL, tooltip = "How far to extend zone boxes to the right")
+bool showTextLabels = input.bool(true, "Show Text Labels", group = GRP_GLOBAL, tooltip = "Show R/S labels with timeframe info")
+bool showPOICenterlines = input.bool(true, "Show POI Centerlines", group = GRP_GLOBAL, tooltip = "Show dotted centerline at zone midpoint")
+int decayBars = input.int(100, "Decay Bars", minval = 10, maxval = 1000, group = GRP_GLOBAL, tooltip = "Number of bars for full alpha decay")
+int maxStrikes = input.int(3, "Max Strikes", minval = 1, maxval = 10, group = GRP_GLOBAL, tooltip = "Strikes before zone is mitigated and removed")
+
+// --- Level 1 Inputs ---
+
+string GRP_L1 = "1. Level 1"
+bool enableL1 = input.bool(true, "Enable", group = GRP_L1)
+string tfL1 = input.timeframe("W", "Timeframe", group = GRP_L1)
+int maxZonesL1 = input.int(3, "Max Zones", minval = 1, maxval = 20, group = GRP_L1)
+float minDistAtrL1 = input.float(1.0, "Min Distance (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GRP_L1)
+float thicknessAtrL1 = input.float(0.5, "Zone Thickness (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_L1)
+int swingLenL1 = input.int(5, "Swing Length", minval = 2, maxval = 50, group = GRP_L1)
+color colorResFillL1 = input.color(#B71C1C, "Resistance Fill", group = GRP_L1)
+color colorSupFillL1 = input.color(#1B5E20, "Support Fill", group = GRP_L1)
+color colorEdgeL1 = input.color(#E53935, "Edge Color", group = GRP_L1)
+bool useVolFilterL1 = input.bool(true, "Volume Filter", group = GRP_L1)
+bool useMitigationL1 = input.bool(true, "Mitigation", group = GRP_L1)
+bool useAlphaDecayL1 = input.bool(true, "Alpha Decay", group = GRP_L1)
+
+// --- Level 2 Inputs ---
+
+string GRP_L2 = "2. Level 2"
+bool enableL2 = input.bool(true, "Enable", group = GRP_L2)
+string tfL2 = input.timeframe("D", "Timeframe", group = GRP_L2)
+int maxZonesL2 = input.int(5, "Max Zones", minval = 1, maxval = 20, group = GRP_L2)
+float minDistAtrL2 = input.float(1.0, "Min Distance (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GRP_L2)
+float thicknessAtrL2 = input.float(0.5, "Zone Thickness (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_L2)
+int swingLenL2 = input.int(5, "Swing Length", minval = 2, maxval = 50, group = GRP_L2)
+color colorResFillL2 = input.color(#D32F2F, "Resistance Fill", group = GRP_L2)
+color colorSupFillL2 = input.color(#2E7D32, "Support Fill", group = GRP_L2)
+color colorEdgeL2 = input.color(#EF5350, "Edge Color", group = GRP_L2)
+bool useVolFilterL2 = input.bool(true, "Volume Filter", group = GRP_L2)
+bool useMitigationL2 = input.bool(true, "Mitigation", group = GRP_L2)
+bool useAlphaDecayL2 = input.bool(true, "Alpha Decay", group = GRP_L2)
+
+// --- Level 3 Inputs ---
+
+string GRP_L3 = "3. Level 3"
+bool enableL3 = input.bool(true, "Enable", group = GRP_L3)
+string tfL3 = input.timeframe("240", "Timeframe", group = GRP_L3)
+int maxZonesL3 = input.int(5, "Max Zones", minval = 1, maxval = 20, group = GRP_L3)
+float minDistAtrL3 = input.float(0.8, "Min Distance (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GRP_L3)
+float thicknessAtrL3 = input.float(0.4, "Zone Thickness (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_L3)
+int swingLenL3 = input.int(5, "Swing Length", minval = 2, maxval = 50, group = GRP_L3)
+color colorResFillL3 = input.color(#E65100, "Resistance Fill", group = GRP_L3)
+color colorSupFillL3 = input.color(#00695C, "Support Fill", group = GRP_L3)
+color colorEdgeL3 = input.color(#FF6D00, "Edge Color", group = GRP_L3)
+bool useVolFilterL3 = input.bool(true, "Volume Filter", group = GRP_L3)
+bool useMitigationL3 = input.bool(true, "Mitigation", group = GRP_L3)
+bool useAlphaDecayL3 = input.bool(true, "Alpha Decay", group = GRP_L3)
+
+// --- Level 4 Inputs ---
+
+string GRP_L4 = "4. Level 4"
+bool enableL4 = input.bool(false, "Enable", group = GRP_L4)
+string tfL4 = input.timeframe("120", "Timeframe", group = GRP_L4)
+int maxZonesL4 = input.int(8, "Max Zones", minval = 1, maxval = 20, group = GRP_L4)
+float minDistAtrL4 = input.float(0.8, "Min Distance (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GRP_L4)
+float thicknessAtrL4 = input.float(0.4, "Zone Thickness (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_L4)
+int swingLenL4 = input.int(4, "Swing Length", minval = 2, maxval = 50, group = GRP_L4)
+color colorResFillL4 = input.color(#F57C00, "Resistance Fill", group = GRP_L4)
+color colorSupFillL4 = input.color(#00838F, "Support Fill", group = GRP_L4)
+color colorEdgeL4 = input.color(#FF9100, "Edge Color", group = GRP_L4)
+bool useVolFilterL4 = input.bool(true, "Volume Filter", group = GRP_L4)
+bool useMitigationL4 = input.bool(true, "Mitigation", group = GRP_L4)
+bool useAlphaDecayL4 = input.bool(true, "Alpha Decay", group = GRP_L4)
+
+// --- Level 5 Inputs ---
+
+string GRP_L5 = "5. Level 5"
+bool enableL5 = input.bool(false, "Enable", group = GRP_L5)
+string tfL5 = input.timeframe("60", "Timeframe", group = GRP_L5)
+int maxZonesL5 = input.int(8, "Max Zones", minval = 1, maxval = 20, group = GRP_L5)
+float minDistAtrL5 = input.float(0.7, "Min Distance (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GRP_L5)
+float thicknessAtrL5 = input.float(0.3, "Zone Thickness (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_L5)
+int swingLenL5 = input.int(4, "Swing Length", minval = 2, maxval = 50, group = GRP_L5)
+color colorResFillL5 = input.color(#FF8F00, "Resistance Fill", group = GRP_L5)
+color colorSupFillL5 = input.color(#00897B, "Support Fill", group = GRP_L5)
+color colorEdgeL5 = input.color(#FFB300, "Edge Color", group = GRP_L5)
+bool useVolFilterL5 = input.bool(true, "Volume Filter", group = GRP_L5)
+bool useMitigationL5 = input.bool(true, "Mitigation", group = GRP_L5)
+bool useAlphaDecayL5 = input.bool(true, "Alpha Decay", group = GRP_L5)
+
+// --- Level 6 Inputs ---
+
+string GRP_L6 = "6. Level 6"
+bool enableL6 = input.bool(false, "Enable", group = GRP_L6)
+string tfL6 = input.timeframe("30", "Timeframe", group = GRP_L6)
+int maxZonesL6 = input.int(10, "Max Zones", minval = 1, maxval = 20, group = GRP_L6)
+float minDistAtrL6 = input.float(0.6, "Min Distance (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GRP_L6)
+float thicknessAtrL6 = input.float(0.3, "Zone Thickness (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_L6)
+int swingLenL6 = input.int(3, "Swing Length", minval = 2, maxval = 50, group = GRP_L6)
+color colorResFillL6 = input.color(#9C27B0, "Resistance Fill", group = GRP_L6)
+color colorSupFillL6 = input.color(#4CAF50, "Support Fill", group = GRP_L6)
+color colorEdgeL6 = input.color(#AB47BC, "Edge Color", group = GRP_L6)
+bool useVolFilterL6 = input.bool(true, "Volume Filter", group = GRP_L6)
+bool useMitigationL6 = input.bool(true, "Mitigation", group = GRP_L6)
+bool useAlphaDecayL6 = input.bool(true, "Alpha Decay", group = GRP_L6)
+
+// --- Level 7 Inputs ---
+
+string GRP_L7 = "7. Level 7"
+bool enableL7 = input.bool(false, "Enable", group = GRP_L7)
+string tfL7 = input.timeframe("15", "Timeframe", group = GRP_L7)
+int maxZonesL7 = input.int(10, "Max Zones", minval = 1, maxval = 20, group = GRP_L7)
+float minDistAtrL7 = input.float(0.5, "Min Distance (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GRP_L7)
+float thicknessAtrL7 = input.float(0.25, "Zone Thickness (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_L7)
+int swingLenL7 = input.int(3, "Swing Length", minval = 2, maxval = 50, group = GRP_L7)
+color colorResFillL7 = input.color(#7B1FA2, "Resistance Fill", group = GRP_L7)
+color colorSupFillL7 = input.color(#388E3C, "Support Fill", group = GRP_L7)
+color colorEdgeL7 = input.color(#9C27B0, "Edge Color", group = GRP_L7)
+bool useVolFilterL7 = input.bool(true, "Volume Filter", group = GRP_L7)
+bool useMitigationL7 = input.bool(true, "Mitigation", group = GRP_L7)
+bool useAlphaDecayL7 = input.bool(true, "Alpha Decay", group = GRP_L7)
+
+// --- Level 8 Inputs ---
+
+string GRP_L8 = "8. Level 8"
+bool enableL8 = input.bool(false, "Enable", group = GRP_L8)
+string tfL8 = input.timeframe("5", "Timeframe", group = GRP_L8)
+int maxZonesL8 = input.int(12, "Max Zones", minval = 1, maxval = 20, group = GRP_L8)
+float minDistAtrL8 = input.float(0.5, "Min Distance (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GRP_L8)
+float thicknessAtrL8 = input.float(0.2, "Zone Thickness (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_L8)
+int swingLenL8 = input.int(3, "Swing Length", minval = 2, maxval = 50, group = GRP_L8)
+color colorResFillL8 = input.color(#1565C0, "Resistance Fill", group = GRP_L8)
+color colorSupFillL8 = input.color(#558B2F, "Support Fill", group = GRP_L8)
+color colorEdgeL8 = input.color(#1E88E5, "Edge Color", group = GRP_L8)
+bool useVolFilterL8 = input.bool(true, "Volume Filter", group = GRP_L8)
+bool useMitigationL8 = input.bool(true, "Mitigation", group = GRP_L8)
+bool useAlphaDecayL8 = input.bool(true, "Alpha Decay", group = GRP_L8)
+
+// --- Level 9 Inputs ---
+
+string GRP_L9 = "9. Level 9"
+bool enableL9 = input.bool(false, "Enable", group = GRP_L9)
+string tfL9 = input.timeframe("3", "Timeframe", group = GRP_L9)
+int maxZonesL9 = input.int(12, "Max Zones", minval = 1, maxval = 20, group = GRP_L9)
+float minDistAtrL9 = input.float(0.4, "Min Distance (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GRP_L9)
+float thicknessAtrL9 = input.float(0.2, "Zone Thickness (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_L9)
+int swingLenL9 = input.int(3, "Swing Length", minval = 2, maxval = 50, group = GRP_L9)
+color colorResFillL9 = input.color(#0277BD, "Resistance Fill", group = GRP_L9)
+color colorSupFillL9 = input.color(#33691E, "Support Fill", group = GRP_L9)
+color colorEdgeL9 = input.color(#039BE5, "Edge Color", group = GRP_L9)
+bool useVolFilterL9 = input.bool(true, "Volume Filter", group = GRP_L9)
+bool useMitigationL9 = input.bool(true, "Mitigation", group = GRP_L9)
+bool useAlphaDecayL9 = input.bool(true, "Alpha Decay", group = GRP_L9)
+
+// --- Level 10 Inputs ---
+
+string GRP_L10 = "10. Level 10"
+bool enableL10 = input.bool(false, "Enable", group = GRP_L10)
+string tfL10 = input.timeframe("1", "Timeframe", group = GRP_L10)
+int maxZonesL10 = input.int(15, "Max Zones", minval = 1, maxval = 20, group = GRP_L10)
+float minDistAtrL10 = input.float(0.3, "Min Distance (ATR)", minval = 0.1, maxval = 10.0, step = 0.1, group = GRP_L10)
+float thicknessAtrL10 = input.float(0.15, "Zone Thickness (ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_L10)
+int swingLenL10 = input.int(2, "Swing Length", minval = 2, maxval = 50, group = GRP_L10)
+color colorResFillL10 = input.color(#01579B, "Resistance Fill", group = GRP_L10)
+color colorSupFillL10 = input.color(#827717, "Support Fill", group = GRP_L10)
+color colorEdgeL10 = input.color(#0288D1, "Edge Color", group = GRP_L10)
+bool useVolFilterL10 = input.bool(true, "Volume Filter", group = GRP_L10)
+bool useMitigationL10 = input.bool(true, "Mitigation", group = GRP_L10)
+bool useAlphaDecayL10 = input.bool(true, "Alpha Decay", group = GRP_L10)
+
+// --- Persistent Zone Arrays (one per level) ---
+
+var ZoneData[] zonesL1 = array.new<ZoneData>()
+var ZoneData[] zonesL2 = array.new<ZoneData>()
+var ZoneData[] zonesL3 = array.new<ZoneData>()
+var ZoneData[] zonesL4 = array.new<ZoneData>()
+var ZoneData[] zonesL5 = array.new<ZoneData>()
+var ZoneData[] zonesL6 = array.new<ZoneData>()
+var ZoneData[] zonesL7 = array.new<ZoneData>()
+var ZoneData[] zonesL8 = array.new<ZoneData>()
+var ZoneData[] zonesL9 = array.new<ZoneData>()
+var ZoneData[] zonesL10 = array.new<ZoneData>()
+
+// --- Alert State Variables ---
+
+var bool alertZoneTouch = false
+var bool alertZoneMitigated = false
+var bool alertNewZone = false
+
+// --- Request Security Calls (top-level, one per level) ---
+// Each call fetches: [pivotHigh, pivotLow, volume, volumeSma20, atr50]
+// Using tuple returns to minimize total security calls (10 total)
+
+[phL1, plL1, volL1, volSmaL1, atrL1] = request.security(syminfo.tickerid, tfL1, [ta.pivothigh(high, swingLenL1, swingLenL1), ta.pivotlow(low, swingLenL1, swingLenL1), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+
+[phL2, plL2, volL2, volSmaL2, atrL2] = request.security(syminfo.tickerid, tfL2, [ta.pivothigh(high, swingLenL2, swingLenL2), ta.pivotlow(low, swingLenL2, swingLenL2), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+
+[phL3, plL3, volL3, volSmaL3, atrL3] = request.security(syminfo.tickerid, tfL3, [ta.pivothigh(high, swingLenL3, swingLenL3), ta.pivotlow(low, swingLenL3, swingLenL3), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+
+[phL4, plL4, volL4, volSmaL4, atrL4] = request.security(syminfo.tickerid, tfL4, [ta.pivothigh(high, swingLenL4, swingLenL4), ta.pivotlow(low, swingLenL4, swingLenL4), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+
+[phL5, plL5, volL5, volSmaL5, atrL5] = request.security(syminfo.tickerid, tfL5, [ta.pivothigh(high, swingLenL5, swingLenL5), ta.pivotlow(low, swingLenL5, swingLenL5), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+
+[phL6, plL6, volL6, volSmaL6, atrL6] = request.security(syminfo.tickerid, tfL6, [ta.pivothigh(high, swingLenL6, swingLenL6), ta.pivotlow(low, swingLenL6, swingLenL6), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+
+[phL7, plL7, volL7, volSmaL7, atrL7] = request.security(syminfo.tickerid, tfL7, [ta.pivothigh(high, swingLenL7, swingLenL7), ta.pivotlow(low, swingLenL7, swingLenL7), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+
+[phL8, plL8, volL8, volSmaL8, atrL8] = request.security(syminfo.tickerid, tfL8, [ta.pivothigh(high, swingLenL8, swingLenL8), ta.pivotlow(low, swingLenL8, swingLenL8), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+
+[phL9, plL9, volL9, volSmaL9, atrL9] = request.security(syminfo.tickerid, tfL9, [ta.pivothigh(high, swingLenL9, swingLenL9), ta.pivotlow(low, swingLenL9, swingLenL9), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+
+[phL10, plL10, volL10, volSmaL10, atrL10] = request.security(syminfo.tickerid, tfL10, [ta.pivothigh(high, swingLenL10, swingLenL10), ta.pivotlow(low, swingLenL10, swingLenL10), volume, ta.sma(volume, 20), ta.atr(50)], lookahead = barmerge.lookahead_off)
+
+// --- Helper: Convert Timeframe to Human-Readable Label ---
+
+tfToLabel(string tf) =>
+    string result = switch tf
+        'W' => '1W'
+        'D' => '1D'
+        '240' => '4H'
+        '120' => '2H'
+        '60' => '1H'
+        '30' => '30M'
+        '15' => '15M'
+        '5' => '5M'
+        '3' => '3M'
+        '1' => '1M'
+        => tf
+    result
+
+// --- Process Level Function ---
+// Handles zone creation, overlap check, mitigation, decay, and drawing.
+// Does NOT call request.security() - receives fetched data as parameters.
+
+processLevel(bool enable, float pivotHigh, float pivotLow, float vol, float volSma, float atrVal, int maxZonesLvl, float minDistAtr, float thicknessAtr, color colorRes, color colorSup, color colorEdge, bool useVolFilter, bool useMitig, bool useDecay, ZoneData[] zones, int extBars, bool showLabels, int decayBarsGlobal, int maxStrikesGlobal, int levelNum, string tf) =>
+    bool touchFlag = false
+    bool mitigatedFlag = false
+    bool newZoneFlag = false
+    float atrSafe = nz(atrVal, 0.0)
+
+    // --- Zone Creation: Resistance (from pivot highs) ---
+    if enable and not na(pivotHigh) and atrSafe > 0
+        bool volValid = useVolFilter ? (vol > volSma) : true
+        if volValid
+            float zHigh = pivotHigh + atrSafe * thicknessAtr / 2.0
+            float zLow = pivotHigh - atrSafe * thicknessAtr / 2.0
+            // Overlap prevention
+            bool tooClose = false
+            if array.size(zones) > 0
+                for i = 0 to array.size(zones) - 1
+                    ZoneData existing = array.get(zones, i)
+                    float existingMid = (existing.priceHigh + existing.priceLow) / 2.0
+                    float newMid = (zHigh + zLow) / 2.0
+                    if math.abs(existingMid - newMid) < atrSafe * minDistAtr
+                        tooClose := true
+                        break
+            if not tooClose
+                // Remove oldest if at capacity
+                if array.size(zones) >= maxZonesLvl
+                    ZoneData oldest = array.get(zones, 0)
+                    int oldestIdx = 0
+                    for i = 1 to array.size(zones) - 1
+                        ZoneData z = array.get(zones, i)
+                        if z.birthBarIndex < oldest.birthBarIndex
+                            oldest := z
+                            oldestIdx := i
+                    ZoneData removed = array.remove(zones, oldestIdx)
+                    if not na(removed.boxRef)
+                        box.delete(removed.boxRef)
+                    if not na(removed.topLine)
+                        line.delete(removed.topLine)
+                    if not na(removed.botLine)
+                        line.delete(removed.botLine)
+                    if not na(removed.lblRef)
+                        label.delete(removed.lblRef)
+                // Create new resistance zone
+                ZoneData newZone = ZoneData.new(zHigh, zLow, -1, bar_index, 0, bar_index, na, na, na, na)
+                array.push(zones, newZone)
+                newZoneFlag := true
+
+    // --- Zone Creation: Support (from pivot lows) ---
+    if enable and not na(pivotLow) and atrSafe > 0
+        bool volValidS = useVolFilter ? (vol > volSma) : true
+        if volValidS
+            float zHighS = pivotLow + atrSafe * thicknessAtr / 2.0
+            float zLowS = pivotLow - atrSafe * thicknessAtr / 2.0
+            // Overlap prevention
+            bool tooCloseS = false
+            if array.size(zones) > 0
+                for i = 0 to array.size(zones) - 1
+                    ZoneData existing = array.get(zones, i)
+                    float existingMid = (existing.priceHigh + existing.priceLow) / 2.0
+                    float newMid = (zHighS + zLowS) / 2.0
+                    if math.abs(existingMid - newMid) < atrSafe * minDistAtr
+                        tooCloseS := true
+                        break
+            if not tooCloseS
+                // Remove oldest if at capacity
+                if array.size(zones) >= maxZonesLvl
+                    ZoneData oldest = array.get(zones, 0)
+                    int oldestIdx = 0
+                    for i = 1 to array.size(zones) - 1
+                        ZoneData z = array.get(zones, i)
+                        if z.birthBarIndex < oldest.birthBarIndex
+                            oldest := z
+                            oldestIdx := i
+                    ZoneData removed = array.remove(zones, oldestIdx)
+                    if not na(removed.boxRef)
+                        box.delete(removed.boxRef)
+                    if not na(removed.topLine)
+                        line.delete(removed.topLine)
+                    if not na(removed.botLine)
+                        line.delete(removed.botLine)
+                    if not na(removed.lblRef)
+                        label.delete(removed.lblRef)
+                // Create new support zone
+                ZoneData newZone = ZoneData.new(zHighS, zLowS, 1, bar_index, 0, bar_index, na, na, na, na)
+                array.push(zones, newZone)
+                newZoneFlag := true
+
+    // --- Mitigation: Check for zone breaches ---
+    if enable and useMitig and barstate.isconfirmed and array.size(zones) > 0
+        int idx = array.size(zones) - 1
+        while idx >= 0
+            ZoneData zone = array.get(zones, idx)
+            bool breached = false
+            if zone.direction == -1
+                // Resistance: breached if close > priceHigh
+                if close > zone.priceHigh
+                    breached := true
+            else
+                // Support: breached if close < priceLow
+                if close < zone.priceLow
+                    breached := true
+            if breached
+                zone.strikes += 1
+                if zone.strikes >= maxStrikesGlobal
+                    // Delete drawing objects
+                    if not na(zone.boxRef)
+                        box.delete(zone.boxRef)
+                    if not na(zone.topLine)
+                        line.delete(zone.topLine)
+                    if not na(zone.botLine)
+                        line.delete(zone.botLine)
+                    if not na(zone.lblRef)
+                        label.delete(zone.lblRef)
+                    array.remove(zones, idx)
+                    mitigatedFlag := true
+            idx -= 1
+
+    // --- Zone Touch Detection ---
+    if enable and array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            ZoneData zone = array.get(zones, i)
+            if high >= zone.priceLow and low <= zone.priceHigh
+                touchFlag := true
+                break
+
+    // --- Drawing: Update visuals for all zones ---
+    if enable and array.size(zones) > 0
+        string tfLabel = tfToLabel(tf)
+        for i = 0 to array.size(zones) - 1
+            ZoneData zone = array.get(zones, i)
+            // Calculate alpha decay
+            int alpha = 0
+            if useDecay
+                alpha := math.min(90, int((bar_index - zone.birthBarIndex) * 80.0 / math.max(decayBarsGlobal, 1)))
+            // Determine fill color with decay
+            color fillColor = zone.direction == -1 ? color.new(colorRes, alpha) : color.new(colorSup, alpha)
+            // Delete old drawing objects
+            if not na(zone.boxRef)
+                box.delete(zone.boxRef)
+            if not na(zone.topLine)
+                line.delete(zone.topLine)
+            if not na(zone.botLine)
+                line.delete(zone.botLine)
+            if not na(zone.lblRef)
+                label.delete(zone.lblRef)
+            // Draw box (zone fill)
+            zone.boxRef := box.new(zone.birthBarIndex, zone.priceHigh, bar_index + extBars, zone.priceLow, border_color = color.new(colorEdge, 0), border_width = 1, bgcolor = fillColor, xloc = xloc.bar_index)
+            // Draw top and bottom boundary lines (extend.both)
+            zone.topLine := line.new(bar_index - 1, zone.priceHigh, bar_index, zone.priceHigh, xloc = xloc.bar_index, extend = extend.both, color = colorEdge, style = line.style_solid, width = 1)
+            zone.botLine := line.new(bar_index - 1, zone.priceLow, bar_index, zone.priceLow, xloc = xloc.bar_index, extend = extend.both, color = colorEdge, style = line.style_solid, width = 1)
+            // Draw text label
+            if showLabels
+                string labelText = (zone.direction == -1 ? "R" : "S") + " [" + tfLabel + "]"
+                zone.lblRef := label.new(bar_index + extBars, (zone.priceHigh + zone.priceLow) / 2.0, labelText, xloc = xloc.bar_index, style = label.style_none, textcolor = colorEdge, size = size.small)
+
+
+    [touchFlag, mitigatedFlag, newZoneFlag]
+
+// --- Process All 10 Levels ---
+
+[touchL1, mitigL1, newL1] = processLevel(enableL1, phL1, plL1, volL1, volSmaL1, atrL1, maxZonesL1, minDistAtrL1, thicknessAtrL1, colorResFillL1, colorSupFillL1, colorEdgeL1, useVolFilterL1, useMitigationL1, useAlphaDecayL1, zonesL1, extendBarsRight, showTextLabels, decayBars, maxStrikes, 1, tfL1)
+
+[touchL2, mitigL2, newL2] = processLevel(enableL2, phL2, plL2, volL2, volSmaL2, atrL2, maxZonesL2, minDistAtrL2, thicknessAtrL2, colorResFillL2, colorSupFillL2, colorEdgeL2, useVolFilterL2, useMitigationL2, useAlphaDecayL2, zonesL2, extendBarsRight, showTextLabels, decayBars, maxStrikes, 2, tfL2)
+
+[touchL3, mitigL3, newL3] = processLevel(enableL3, phL3, plL3, volL3, volSmaL3, atrL3, maxZonesL3, minDistAtrL3, thicknessAtrL3, colorResFillL3, colorSupFillL3, colorEdgeL3, useVolFilterL3, useMitigationL3, useAlphaDecayL3, zonesL3, extendBarsRight, showTextLabels, decayBars, maxStrikes, 3, tfL3)
+
+[touchL4, mitigL4, newL4] = processLevel(enableL4, phL4, plL4, volL4, volSmaL4, atrL4, maxZonesL4, minDistAtrL4, thicknessAtrL4, colorResFillL4, colorSupFillL4, colorEdgeL4, useVolFilterL4, useMitigationL4, useAlphaDecayL4, zonesL4, extendBarsRight, showTextLabels, decayBars, maxStrikes, 4, tfL4)
+
+[touchL5, mitigL5, newL5] = processLevel(enableL5, phL5, plL5, volL5, volSmaL5, atrL5, maxZonesL5, minDistAtrL5, thicknessAtrL5, colorResFillL5, colorSupFillL5, colorEdgeL5, useVolFilterL5, useMitigationL5, useAlphaDecayL5, zonesL5, extendBarsRight, showTextLabels, decayBars, maxStrikes, 5, tfL5)
+
+[touchL6, mitigL6, newL6] = processLevel(enableL6, phL6, plL6, volL6, volSmaL6, atrL6, maxZonesL6, minDistAtrL6, thicknessAtrL6, colorResFillL6, colorSupFillL6, colorEdgeL6, useVolFilterL6, useMitigationL6, useAlphaDecayL6, zonesL6, extendBarsRight, showTextLabels, decayBars, maxStrikes, 6, tfL6)
+
+[touchL7, mitigL7, newL7] = processLevel(enableL7, phL7, plL7, volL7, volSmaL7, atrL7, maxZonesL7, minDistAtrL7, thicknessAtrL7, colorResFillL7, colorSupFillL7, colorEdgeL7, useVolFilterL7, useMitigationL7, useAlphaDecayL7, zonesL7, extendBarsRight, showTextLabels, decayBars, maxStrikes, 7, tfL7)
+
+[touchL8, mitigL8, newL8] = processLevel(enableL8, phL8, plL8, volL8, volSmaL8, atrL8, maxZonesL8, minDistAtrL8, thicknessAtrL8, colorResFillL8, colorSupFillL8, colorEdgeL8, useVolFilterL8, useMitigationL8, useAlphaDecayL8, zonesL8, extendBarsRight, showTextLabels, decayBars, maxStrikes, 8, tfL8)
+
+[touchL9, mitigL9, newL9] = processLevel(enableL9, phL9, plL9, volL9, volSmaL9, atrL9, maxZonesL9, minDistAtrL9, thicknessAtrL9, colorResFillL9, colorSupFillL9, colorEdgeL9, useVolFilterL9, useMitigationL9, useAlphaDecayL9, zonesL9, extendBarsRight, showTextLabels, decayBars, maxStrikes, 9, tfL9)
+
+[touchL10, mitigL10, newL10] = processLevel(enableL10, phL10, plL10, volL10, volSmaL10, atrL10, maxZonesL10, minDistAtrL10, thicknessAtrL10, colorResFillL10, colorSupFillL10, colorEdgeL10, useVolFilterL10, useMitigationL10, useAlphaDecayL10, zonesL10, extendBarsRight, showTextLabels, decayBars, maxStrikes, 10, tfL10)
+
+// --- POI Centerlines (drawn separately to avoid UDT field limits) ---
+
+drawCenterlines(bool enable, bool showCenterlines, ZoneData[] zones, color edgeColor) =>
+    if enable and showCenterlines and array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            ZoneData zone = array.get(zones, i)
+            float mid = (zone.priceHigh + zone.priceLow) / 2.0
+            line.new(bar_index - 1, mid, bar_index, mid, xloc = xloc.bar_index, extend = extend.both, color = color.new(edgeColor, 50), style = line.style_dotted, width = 1)
+
+drawCenterlines(enableL1, showPOICenterlines, zonesL1, colorEdgeL1)
+drawCenterlines(enableL2, showPOICenterlines, zonesL2, colorEdgeL2)
+drawCenterlines(enableL3, showPOICenterlines, zonesL3, colorEdgeL3)
+drawCenterlines(enableL4, showPOICenterlines, zonesL4, colorEdgeL4)
+drawCenterlines(enableL5, showPOICenterlines, zonesL5, colorEdgeL5)
+drawCenterlines(enableL6, showPOICenterlines, zonesL6, colorEdgeL6)
+drawCenterlines(enableL7, showPOICenterlines, zonesL7, colorEdgeL7)
+drawCenterlines(enableL8, showPOICenterlines, zonesL8, colorEdgeL8)
+drawCenterlines(enableL9, showPOICenterlines, zonesL9, colorEdgeL9)
+drawCenterlines(enableL10, showPOICenterlines, zonesL10, colorEdgeL10)
+
+// --- Aggregate Alert Flags ---
+
+bool anyTouch = touchL1 or touchL2 or touchL3 or touchL4 or touchL5 or touchL6 or touchL7 or touchL8 or touchL9 or touchL10
+bool anyMitigated = mitigL1 or mitigL2 or mitigL3 or mitigL4 or mitigL5 or mitigL6 or mitigL7 or mitigL8 or mitigL9 or mitigL10
+bool anyNewZone = newL1 or newL2 or newL3 or newL4 or newL5 or newL6 or newL7 or newL8 or newL9 or newL10
+
+// --- Dynamic Alerts ---
+
+if anyTouch
+    alert("Zone Touch on " + syminfo.ticker + " - Price interacting with S/R zone", alert.freq_once_per_bar)
+
+if anyMitigated
+    alert("Zone Mitigated on " + syminfo.ticker + " - S/R zone removed after max strikes", alert.freq_once_per_bar)
+
+if anyNewZone
+    alert("New Zone Created on " + syminfo.ticker + " - New S/R zone detected", alert.freq_once_per_bar)
+
+// --- Alert Conditions ---
+
+alertcondition(anyTouch, title = "Zone Touch", message = "{{ticker}}: Price touched an S/R zone boundary")
+alertcondition(anyMitigated, title = "Zone Mitigated", message = "{{ticker}}: An S/R zone was mitigated and removed")
+alertcondition(anyNewZone, title = "New Zone Created", message = "{{ticker}}: A new S/R zone was created")
