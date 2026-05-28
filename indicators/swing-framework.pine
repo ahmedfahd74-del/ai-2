@@ -1,0 +1,405 @@
+// ============================================================================
+// SWING TRADING FRAMEWORK
+// ============================================================================
+// A comprehensive Pine Script v5 swing trading indicator that combines:
+//   - Weekly bias detection via pivot structure
+//   - Daily alignment confirmation
+//   - Support/Resistance from chart-timeframe pivots
+//   - EMA trend filter
+//   - Liquidity sweep detection
+//   - Full entry/SL/TP calculation with configurable R:R
+//
+// Features:
+//   - Non-repainting signals using barstate.isconfirmed
+//   - Anti-repaint MTF data via barmerge.lookahead_off
+//   - Dashboard with complete trade state
+//   - Visual trade levels (entry, SL, TP1, TP2)
+//
+// Version: 1.0
+// ============================================================================
+
+//@version=5
+indicator("Swing Trading Framework", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// --- Inputs ---
+
+emaLength       = input.int(50, "EMA Length", minval=1)
+weeklyEmaLength = input.int(21, "Weekly EMA Length", minval=1)
+dailyEmaLength  = input.int(21, "Daily EMA Length", minval=1)
+pivotLeftBars   = input.int(5, "Pivot Left Bars", minval=1, maxval=20)
+pivotRightBars  = input.int(5, "Pivot Right Bars", minval=1, maxval=20)
+atrLength       = input.int(14, "ATR Length", minval=1)
+atrMultiplier   = input.float(1.5, "ATR Multiplier for SL", minval=0.1, step=0.1)
+rr1             = input.float(2.0, "Risk:Reward 1", minval=0.5, step=0.5)
+rr2             = input.float(3.0, "Risk:Reward 2", minval=1.0, step=0.5)
+useLiquiditySweep = input.bool(true, "Use Liquidity Sweep Filter")
+htfPivotLength  = input.int(3, "HTF Pivot Length", minval=1, maxval=10)
+
+// --- Constants ---
+
+string BULLISH = "Bullish"
+string BEARISH = "Bearish"
+string NEUTRAL = "Neutral"
+string LONG_READY  = "LONG READY"
+string SHORT_READY = "SHORT READY"
+string NO_SETUP    = "NO SETUP"
+
+// --- EMA Calculation (Chart Timeframe) ---
+
+emaValue = ta.ema(close, emaLength)
+isAboveEma = close > emaValue
+isBelowEma = close < emaValue
+
+// --- ATR Calculation ---
+
+atrValue = ta.atr(atrLength)
+
+// --- Section 1: Weekly Bias ---
+
+// Fetch weekly pivot data
+weeklyHigh  = request.security(syminfo.tickerid, "W", high, barmerge.gaps_off, barmerge.lookahead_off)
+weeklyLow   = request.security(syminfo.tickerid, "W", low, barmerge.gaps_off, barmerge.lookahead_off)
+weeklyClose = request.security(syminfo.tickerid, "W", close, barmerge.gaps_off, barmerge.lookahead_off)
+
+// Weekly EMA for fallback
+weeklyEma = request.security(syminfo.tickerid, "W", ta.ema(close, weeklyEmaLength), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Weekly pivot detection
+weeklyPivotHigh = request.security(syminfo.tickerid, "W", ta.pivothigh(high, htfPivotLength, htfPivotLength), barmerge.gaps_off, barmerge.lookahead_off)
+weeklyPivotLow  = request.security(syminfo.tickerid, "W", ta.pivotlow(low, htfPivotLength, htfPivotLength), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Track last two weekly pivot highs and lows using ta.valuewhen
+lastWeeklyPH  = ta.valuewhen(not na(weeklyPivotHigh), weeklyPivotHigh, 0)
+prevWeeklyPH  = ta.valuewhen(not na(weeklyPivotHigh), weeklyPivotHigh, 1)
+lastWeeklyPL  = ta.valuewhen(not na(weeklyPivotLow), weeklyPivotLow, 0)
+prevWeeklyPL  = ta.valuewhen(not na(weeklyPivotLow), weeklyPivotLow, 1)
+
+// Determine weekly bias
+var string weeklyBias = NEUTRAL
+
+if not na(lastWeeklyPH) and not na(prevWeeklyPH) and not na(lastWeeklyPL) and not na(prevWeeklyPL)
+    // HH + HL = Bullish
+    if lastWeeklyPH > prevWeeklyPH and lastWeeklyPL > prevWeeklyPL
+        weeklyBias := BULLISH
+    // LH + LL = Bearish
+    else if lastWeeklyPH < prevWeeklyPH and lastWeeklyPL < prevWeeklyPL
+        weeklyBias := BEARISH
+    else
+        weeklyBias := NEUTRAL
+else
+    // Fallback: weekly close vs weekly EMA
+    if not na(weeklyClose) and not na(weeklyEma)
+        if weeklyClose > weeklyEma
+            weeklyBias := BULLISH
+        else if weeklyClose < weeklyEma
+            weeklyBias := BEARISH
+        else
+            weeklyBias := NEUTRAL
+    else
+        weeklyBias := NEUTRAL
+
+// --- Section 2: Daily Alignment ---
+
+// Fetch daily data
+dailyClose = request.security(syminfo.tickerid, "D", close, barmerge.gaps_off, barmerge.lookahead_off)
+dailyEma   = request.security(syminfo.tickerid, "D", ta.ema(close, dailyEmaLength), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Daily pivot detection
+dailyPivotHigh = request.security(syminfo.tickerid, "D", ta.pivothigh(high, htfPivotLength, htfPivotLength), barmerge.gaps_off, barmerge.lookahead_off)
+dailyPivotLow  = request.security(syminfo.tickerid, "D", ta.pivotlow(low, htfPivotLength, htfPivotLength), barmerge.gaps_off, barmerge.lookahead_off)
+
+// Track last two daily pivot highs and lows
+lastDailyPH = ta.valuewhen(not na(dailyPivotHigh), dailyPivotHigh, 0)
+prevDailyPH = ta.valuewhen(not na(dailyPivotHigh), dailyPivotHigh, 1)
+lastDailyPL = ta.valuewhen(not na(dailyPivotLow), dailyPivotLow, 0)
+prevDailyPL = ta.valuewhen(not na(dailyPivotLow), dailyPivotLow, 1)
+
+// Determine daily alignment
+var string dailyAlignment = NEUTRAL
+
+if not na(dailyClose) and not na(dailyEma)
+    // Bullish alignment: close > EMA AND (HH pattern OR close > last pivot high)
+    if dailyClose > dailyEma and (( not na(lastDailyPH) and not na(prevDailyPH) and lastDailyPH > prevDailyPH) or (not na(lastDailyPH) and dailyClose > lastDailyPH))
+        dailyAlignment := BULLISH
+    // Bearish alignment: close < EMA AND (LL pattern OR close < last pivot low)
+    else if dailyClose < dailyEma and ((not na(lastDailyPL) and not na(prevDailyPL) and lastDailyPL < prevDailyPL) or (not na(lastDailyPL) and dailyClose < lastDailyPL))
+        dailyAlignment := BEARISH
+    else
+        dailyAlignment := NEUTRAL
+else
+    dailyAlignment := NEUTRAL
+
+// --- Section 3: Support / Resistance ---
+
+// Detect pivots on chart timeframe
+pivotHigh = ta.pivothigh(high, pivotLeftBars, pivotRightBars)
+pivotLow  = ta.pivotlow(low, pivotLeftBars, pivotRightBars)
+
+// Store most recent confirmed pivot levels
+var float resistanceLevel = na
+var float supportLevel    = na
+
+if not na(pivotHigh)
+    resistanceLevel := pivotHigh
+
+if not na(pivotLow)
+    supportLevel := pivotLow
+
+// --- Section 4: EMA Filter ---
+
+string emaStatus = isAboveEma ? BULLISH : isBelowEma ? BEARISH : NEUTRAL
+
+// --- Section 5: Liquidity Sweep Detection ---
+
+var string sweepStatus = "None"
+
+if barstate.isconfirmed
+    // Bullish sweep: wick below support, close back above
+    if useLiquiditySweep and not na(supportLevel) and low < supportLevel and close > supportLevel
+        sweepStatus := BULLISH
+    // Bearish sweep: wick above resistance, close back below
+    else if useLiquiditySweep and not na(resistanceLevel) and high > resistanceLevel and close < resistanceLevel
+        sweepStatus := BEARISH
+    else
+        sweepStatus := "None"
+
+// --- Section 6: Entry / SL / TP Logic ---
+
+var string tradeStatus = NO_SETUP
+var float entryPrice   = na
+var float slPrice      = na
+var float tp1Price     = na
+var float tp2Price     = na
+
+// Condition checks for long setup
+bool longWeeklyOk    = weeklyBias == BULLISH or (weeklyBias == NEUTRAL and dailyAlignment == BULLISH)
+bool longDailyOk     = dailyAlignment == BULLISH
+bool longEmaOk       = isAboveEma
+bool longSupportOk   = not na(supportLevel) and (close > supportLevel or (low < supportLevel and close > supportLevel))
+bool longSweepOk     = useLiquiditySweep ? sweepStatus == BULLISH : true
+
+// Condition checks for short setup
+bool shortWeeklyOk   = weeklyBias == BEARISH or (weeklyBias == NEUTRAL and dailyAlignment == BEARISH)
+bool shortDailyOk    = dailyAlignment == BEARISH
+bool shortEmaOk      = isBelowEma
+bool shortResistOk   = not na(resistanceLevel) and (close < resistanceLevel or (high > resistanceLevel and close < resistanceLevel))
+bool shortSweepOk    = useLiquiditySweep ? sweepStatus == BEARISH : true
+
+// --- Section 7: Trade Status Determination ---
+
+if barstate.isconfirmed
+    if longWeeklyOk and longDailyOk and longEmaOk and longSupportOk and longSweepOk
+        tradeStatus := LONG_READY
+        entryPrice  := close
+        slPrice     := supportLevel - atrValue * atrMultiplier
+        tp1Price    := close + (close - slPrice) * rr1
+        tp2Price    := close + (close - slPrice) * rr2
+    else if shortWeeklyOk and shortDailyOk and shortEmaOk and shortResistOk and shortSweepOk
+        tradeStatus := SHORT_READY
+        entryPrice  := close
+        slPrice     := resistanceLevel + atrValue * atrMultiplier
+        tp1Price    := close - (slPrice - close) * rr1
+        tp2Price    := close - (slPrice - close) * rr2
+    else
+        tradeStatus := NO_SETUP
+        entryPrice  := na
+        slPrice     := na
+        tp1Price    := na
+        tp2Price    := na
+
+// --- Section 8: Dashboard ---
+
+var table dashboard = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
+
+// Helper function for bias coloring
+colorForBias(string bias) =>
+    bias == BULLISH ? color.green : bias == BEARISH ? color.red : color.gray
+
+// Update dashboard on last bar
+if barstate.islast
+    // Row 0: Symbol
+    table.cell(dashboard, 0, 0, "Symbol", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 0, syminfo.ticker, text_color=color.white, text_size=size.small)
+
+    // Row 1: Timeframe
+    table.cell(dashboard, 0, 1, "Timeframe", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 1, timeframe.period, text_color=color.white, text_size=size.small)
+
+    // Row 2: Weekly Bias
+    table.cell(dashboard, 0, 2, "Weekly Bias", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 2, weeklyBias, text_color=colorForBias(weeklyBias), text_size=size.small)
+
+    // Row 3: Daily Alignment
+    table.cell(dashboard, 0, 3, "Daily Alignment", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 3, dailyAlignment, text_color=colorForBias(dailyAlignment), text_size=size.small)
+
+    // Row 4: EMA Status
+    table.cell(dashboard, 0, 4, "EMA Status", text_color=color.white, text_size=size.small)
+    string emaText = isAboveEma ? "Above" : "Below"
+    color emaColor = isAboveEma ? color.green : color.red
+    table.cell(dashboard, 1, 4, emaText, text_color=emaColor, text_size=size.small)
+
+    // Row 5: Support
+    table.cell(dashboard, 0, 5, "Support", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 5, not na(supportLevel) ? str.tostring(supportLevel, format.mintick) : "---", text_color=color.green, text_size=size.small)
+
+    // Row 6: Resistance
+    table.cell(dashboard, 0, 6, "Resistance", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 6, not na(resistanceLevel) ? str.tostring(resistanceLevel, format.mintick) : "---", text_color=color.red, text_size=size.small)
+
+    // Row 7: Liquidity Sweep
+    table.cell(dashboard, 0, 7, "Liq. Sweep", text_color=color.white, text_size=size.small)
+    color sweepColor = sweepStatus == BULLISH ? color.green : sweepStatus == BEARISH ? color.red : color.gray
+    table.cell(dashboard, 1, 7, sweepStatus, text_color=sweepColor, text_size=size.small)
+
+    // Row 8: Entry
+    table.cell(dashboard, 0, 8, "Entry", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 8, not na(entryPrice) ? str.tostring(entryPrice, format.mintick) : "---", text_color=color.white, text_size=size.small)
+
+    // Row 9: Stop Loss
+    table.cell(dashboard, 0, 9, "Stop Loss", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 9, not na(slPrice) ? str.tostring(slPrice, format.mintick) : "---", text_color=color.red, text_size=size.small)
+
+    // Row 10: TP1
+    table.cell(dashboard, 0, 10, "TP1", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 10, not na(tp1Price) ? str.tostring(tp1Price, format.mintick) : "---", text_color=color.green, text_size=size.small)
+
+    // Row 11: TP2
+    table.cell(dashboard, 0, 11, "TP2", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 11, not na(tp2Price) ? str.tostring(tp2Price, format.mintick) : "---", text_color=color.lime, text_size=size.small)
+
+    // Row 12: RR
+    table.cell(dashboard, 0, 12, "RR", text_color=color.white, text_size=size.small)
+    string rrText = "---"
+    if not na(entryPrice) and not na(slPrice) and math.abs(entryPrice - slPrice) > 0
+        float risk = math.abs(entryPrice - slPrice)
+        float reward = not na(tp1Price) ? math.abs(tp1Price - entryPrice) : 0.0
+        rrText := str.tostring(reward / risk, "#.##") + "R"
+    table.cell(dashboard, 1, 12, rrText, text_color=color.white, text_size=size.small)
+
+    // Row 13: Status
+    table.cell(dashboard, 0, 13, "Status", text_color=color.white, text_size=size.small)
+    color statusColor = tradeStatus == LONG_READY ? color.green : tradeStatus == SHORT_READY ? color.red : color.gray
+    table.cell(dashboard, 1, 13, tradeStatus, text_color=statusColor, text_size=size.small)
+
+// --- Section 9: Chart Visuals ---
+
+// Plot EMA with dynamic color
+emaPlotColor = close > emaValue ? color.green : color.red
+plot(emaValue, "EMA", color=emaPlotColor, linewidth=2)
+
+// Support and Resistance lines
+var line supportLine    = na
+var line resistanceLine = na
+
+// Update support line when level changes
+if not na(supportLevel)
+    if not na(supportLine)
+        line.delete(supportLine)
+    supportLine := line.new(bar_index - 1, supportLevel, bar_index, supportLevel, color=color.green, style=line.style_dashed, width=1, extend=extend.both)
+
+if not na(resistanceLevel)
+    if not na(resistanceLine)
+        line.delete(resistanceLine)
+    resistanceLine := line.new(bar_index - 1, resistanceLevel, bar_index, resistanceLevel, color=color.red, style=line.style_dashed, width=1, extend=extend.both)
+
+// Trade level lines and labels
+var line entryLine = na
+var line slLine    = na
+var line tp1Line   = na
+var line tp2Line   = na
+var label tradeLbl = na
+
+// Track previous status to detect changes
+var string prevTradeStatus = NO_SETUP
+
+// Delete old trade visuals when status changes
+if tradeStatus != prevTradeStatus
+    if not na(entryLine)
+        line.delete(entryLine)
+        entryLine := na
+    if not na(slLine)
+        line.delete(slLine)
+        slLine := na
+    if not na(tp1Line)
+        line.delete(tp1Line)
+        tp1Line := na
+    if not na(tp2Line)
+        line.delete(tp2Line)
+        tp2Line := na
+    if not na(tradeLbl)
+        label.delete(tradeLbl)
+        tradeLbl := na
+
+// Draw new trade visuals
+if tradeStatus == LONG_READY and not na(entryPrice) and not na(slPrice) and not na(tp1Price) and not na(tp2Price)
+    if na(entryLine)
+        entryLine := line.new(bar_index - 1, entryPrice, bar_index, entryPrice, color=color.white, style=line.style_solid, width=2, extend=extend.both)
+        slLine    := line.new(bar_index - 1, slPrice, bar_index, slPrice, color=color.red, style=line.style_solid, width=1, extend=extend.both)
+        tp1Line   := line.new(bar_index - 1, tp1Price, bar_index, tp1Price, color=color.green, style=line.style_solid, width=1, extend=extend.both)
+        tp2Line   := line.new(bar_index - 1, tp2Price, bar_index, tp2Price, color=color.lime, style=line.style_solid, width=1, extend=extend.both)
+        tradeLbl  := label.new(bar_index, entryPrice, "LONG READY", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.normal)
+
+if tradeStatus == SHORT_READY and not na(entryPrice) and not na(slPrice) and not na(tp1Price) and not na(tp2Price)
+    if na(entryLine)
+        entryLine := line.new(bar_index - 1, entryPrice, bar_index, entryPrice, color=color.white, style=line.style_solid, width=2, extend=extend.both)
+        slLine    := line.new(bar_index - 1, slPrice, bar_index, slPrice, color=color.red, style=line.style_solid, width=1, extend=extend.both)
+        tp1Line   := line.new(bar_index - 1, tp1Price, bar_index, tp1Price, color=color.green, style=line.style_solid, width=1, extend=extend.both)
+        tp2Line   := line.new(bar_index - 1, tp2Price, bar_index, tp2Price, color=color.lime, style=line.style_solid, width=1, extend=extend.both)
+        tradeLbl  := label.new(bar_index, entryPrice, "SHORT READY", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.normal)
+
+// Update previous status tracker
+prevTradeStatus := tradeStatus
+
+// --- End of Script ---
+
+// ============================================================================
+// NOTES & LIMITATIONS
+// ============================================================================
+//
+// HOW WEEKLY BIAS IS APPROXIMATED:
+//   Weekly bias uses ta.pivothigh() and ta.pivotlow() on the weekly timeframe
+//   with a configurable pivot length (htfPivotLength). The last two confirmed
+//   pivot highs and lows are compared via ta.valuewhen():
+//     - Higher High + Higher Low = Bullish (uptrend structure)
+//     - Lower High + Lower Low = Bearish (downtrend structure)
+//   When pivots are not yet available (na), the fallback compares weekly close
+//   against a weekly EMA to approximate directional bias.
+//
+// HOW DAILY SHIFT IS DETECTED:
+//   Daily alignment combines two conditions:
+//     1. Price position relative to daily EMA (trend filter)
+//     2. Pivot structure (HH/HL for bullish, LH/LL for bearish) OR price
+//        breaking above/below the last confirmed daily pivot
+//   Both conditions must agree for a directional alignment reading.
+//   This helps filter out ranging/choppy periods.
+//
+// LIMITATIONS:
+//   - Weekly and daily pivots require sufficient history to form. The indicator
+//     will show Neutral bias until at least two pivots confirm on each timeframe.
+//   - Liquidity sweep detection is simplified: it checks if a single bar wicks
+//     beyond support/resistance and closes back inside. Multi-bar sweeps or
+//     accumulation patterns are not detected.
+//   - Support/Resistance levels are based on the most recent chart-timeframe
+//     pivot only. Multiple S/R zones or zone clustering is not implemented.
+//   - The indicator does not manage actual trades. "LONG READY" and "SHORT READY"
+//     are signal states, not automatic entries.
+//   - No session/kill zone filtering is applied. Signals can fire at any time.
+//   - The R:R calculation assumes the stop loss is placed at the exact
+//     support/resistance level minus/plus ATR buffer. Actual fills may differ.
+//   - Pine Script v5 does not have User Defined Types (UDTs), so state is
+//     managed via individual var variables rather than structured types.
+//
+// SUGGESTIONS FOR IMPROVEMENT:
+//   - Add session/kill zone filtering (London, New York opens) to reduce
+//     noise during low-volume periods.
+//   - Implement multi-level S/R tracking (e.g., keep last N pivot highs/lows)
+//     for more robust zone detection.
+//   - Add volume confirmation for liquidity sweeps (volume spike on sweep bar).
+//   - Add partial position management logic (scale out at TP1, trail to TP2).
+//   - Consider adding alerts via alertcondition() for LONG READY/SHORT READY.
+//   - Add a higher-timeframe order block or FVG filter for more precise entries.
+//   - Track how many bars since the last signal to implement signal expiry.
+//   - Add divergence detection (RSI/MACD vs price) as additional confluence.
+//
+// ============================================================================
