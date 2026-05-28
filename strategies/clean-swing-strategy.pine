@@ -1,0 +1,333 @@
+//@version=6
+strategy("Clean Swing Strategy [v6]", overlay=true, calc_on_order_fills=false, calc_on_every_tick=false, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=2, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ==========================================
+// 1. INPUTS
+// ==========================================
+grp_filters = "1. Strategy Filters"
+int ema_len = input.int(50, "EMA Length", group=grp_filters)
+bool use_sweep = input.bool(true, "Require Liquidity Sweep", group=grp_filters)
+bool use_bos = input.bool(true, "Require Structure Shift (BOS)", group=grp_filters)
+float min_rr = input.float(2.0, "Minimum Required RR to Enter", group=grp_filters)
+
+grp_zones = "2. Zone Logic"
+int piv_left = input.int(5, "Pivot Left Bars", group=grp_zones)
+int piv_right = input.int(5, "Pivot Right Bars", group=grp_zones)
+float zone_mult = input.float(0.8, "Zone Thickness (x ATR)", group=grp_zones)
+int max_zones = input.int(3, "Keep Only N Most Recent Zones", minval=1, maxval=10, group=grp_zones)
+
+grp_vis = "3. Visuals (Clean Default)"
+bool show_ema = input.bool(true, "EMA", group=grp_vis)
+bool show_zones = input.bool(true, "Chart Zones", group=grp_vis)
+bool show_sweeps = input.bool(false, "Sweep Markers", group=grp_vis)
+bool show_bos = input.bool(false, "BOS Markers", group=grp_vis)
+bool show_trade_levels = input.bool(true, "Active Trade Lines", group=grp_vis)
+bool show_dashboard = input.bool(true, "Dashboard", group=grp_vis)
+
+// ==========================================
+// 2. CORE INDICATORS & MTF FETCH
+// ==========================================
+float ema_val = ta.ema(close, ema_len)
+float atr_val = ta.atr(14)
+
+[w_close, w_ema] = request.security(syminfo.tickerid, "W", [close, ta.ema(close, ema_len)], lookahead=barmerge.lookahead_off)
+[d_close, d_ema] = request.security(syminfo.tickerid, "D", [close, ta.ema(close, ema_len)], lookahead=barmerge.lookahead_off)
+
+w_ph = request.security(syminfo.tickerid, "W", ta.pivothigh(high, piv_left, piv_right), lookahead=barmerge.lookahead_off)
+w_pl = request.security(syminfo.tickerid, "W", ta.pivotlow(low, piv_left, piv_right), lookahead=barmerge.lookahead_off)
+d_ph = request.security(syminfo.tickerid, "D", ta.pivothigh(high, piv_left, piv_right), lookahead=barmerge.lookahead_off)
+d_pl = request.security(syminfo.tickerid, "D", ta.pivotlow(low, piv_left, piv_right), lookahead=barmerge.lookahead_off)
+
+float c_ph = ta.pivothigh(high, piv_left, piv_right)
+float c_pl = ta.pivotlow(low, piv_left, piv_right)
+
+// ==========================================
+// 3. STRUCTURE & BIAS TRACKING
+// ==========================================
+var float w_last_h = na
+var float w_prev_h = na
+var float w_last_l = na
+var float w_prev_l = na
+var float d_last_h = na
+var float d_prev_h = na
+var float d_last_l = na
+var float d_prev_l = na
+
+if not na(w_ph)
+    w_prev_h := w_last_h
+    w_last_h := w_ph
+if not na(w_pl)
+    w_prev_l := w_last_l
+    w_last_l := w_pl
+if not na(d_ph)
+    d_prev_h := d_last_h
+    d_last_h := d_ph
+if not na(d_pl)
+    d_prev_l := d_last_l
+    d_last_l := d_pl
+
+f_classify(float last_h, float prev_h, float last_l, float prev_l) =>
+    int res = 0
+    if not na(last_h) and not na(prev_h) and not na(last_l) and not na(prev_l)
+        if last_h > prev_h and last_l > prev_l
+            res := 1
+        else if last_h < prev_h and last_l < prev_l
+            res := -1
+    res
+
+int w_trend = f_classify(w_last_h, w_prev_h, w_last_l, w_prev_l)
+int d_trend = f_classify(d_last_h, d_prev_h, d_last_l, d_prev_l)
+
+string w_exp = "RANGE"
+if w_trend == 1 and close < w_last_h and close > w_last_l
+    w_exp := "BULLISH RETRACEMENT"
+else if w_trend == 1
+    w_exp := "BULLISH CONTINUATION"
+else if w_trend == -1 and close < w_last_h and close > w_last_l
+    w_exp := "BEARISH RETRACEMENT"
+else if w_trend == -1
+    w_exp := "BEARISH CONTINUATION"
+
+bool d_aligned = (d_trend == 1 and d_close > d_ema) or (d_trend == -1 and d_close < d_ema)
+
+// ==========================================
+// 4. ZONES & CONFLUENCE
+// ==========================================
+var array<float> supp_zones = array.new_float()
+var array<float> res_zones = array.new_float()
+var array<float> w_target = array.new_float()
+var array<float> d_reaction = array.new_float()
+
+if not na(c_ph)
+    array.push(res_zones, c_ph)
+    if array.size(res_zones) > max_zones
+        array.shift(res_zones)
+if not na(c_pl)
+    array.push(supp_zones, c_pl)
+    if array.size(supp_zones) > max_zones
+        array.shift(supp_zones)
+
+if not na(w_ph)
+    array.push(w_target, w_ph)
+if not na(d_pl)
+    array.push(d_reaction, d_pl)
+if array.size(w_target) > 2
+    array.shift(w_target)
+if array.size(d_reaction) > 2
+    array.shift(d_reaction)
+
+f_nearest(array<float> arr, float price, bool findBelow) =>
+    float result = na
+    if array.size(arr) > 0
+        float bestDist = na
+        for i = 0 to array.size(arr) - 1
+            float val = array.get(arr, i)
+            bool valid = findBelow ? val < price : val > price
+            if valid
+                float dist = math.abs(val - price)
+                if na(bestDist) or dist < bestDist
+                    bestDist := dist
+                    result := val
+    result
+
+float near_sup = f_nearest(supp_zones, close, true)
+float near_res = f_nearest(res_zones, close, false)
+float near_w_tgt = array.size(w_target) > 0 ? array.get(w_target, array.size(w_target) - 1) : na
+float near_d_react = array.size(d_reaction) > 0 ? array.get(d_reaction, array.size(d_reaction) - 1) : na
+
+// ==========================================
+// 5. SWEEP & BOS DETECTION
+// ==========================================
+bool swept_sup = not na(near_sup) and low < near_sup - atr_val * 0.2 and close > near_sup
+bool swept_res = not na(near_res) and high > near_res + atr_val * 0.2 and close < near_res
+bool bos_long = not na(d_last_h) and close > d_last_h
+bool bos_short = not na(d_last_l) and close < d_last_l
+
+// ==========================================
+// 6. SETUP QUALITY GRADING
+// ==========================================
+bool long_bias = w_trend >= 0 and d_trend >= 0 and close > ema_val
+bool short_bias = w_trend <= 0 and d_trend <= 0 and close < ema_val
+
+int score = 0
+if w_trend != 0
+    score += 20
+if d_aligned
+    score += 25
+if not na(near_sup) or not na(near_res)
+    score += 20
+if (swept_sup and long_bias) or (swept_res and short_bias)
+    score += 15
+if (bos_long and long_bias) or (bos_short and short_bias)
+    score += 20
+
+string grade = score >= 80 ? "A" : score >= 65 ? "B" : score >= 50 ? "C" : score >= 35 ? "D" : "F"
+
+// ==========================================
+// 7. STRATEGY LOGIC (ENTRIES & EXITS)
+// ==========================================
+var float active_sl = na
+var float active_tp = na
+
+if barstate.isconfirmed and strategy.position_size == 0
+    bool can_long = long_bias and not na(near_sup) and (not use_sweep or swept_sup) and (not use_bos or bos_long)
+    bool can_short = short_bias and not na(near_res) and (not use_sweep or swept_res) and (not use_bos or bos_short)
+
+    float sl_long = nz(near_sup, ta.lowest(low, 10)) - atr_val * zone_mult
+    float sl_short = nz(near_res, ta.highest(high, 10)) + atr_val * zone_mult
+
+    float tp_long = not na(near_res) ? near_res : not na(near_w_tgt) ? near_w_tgt : na
+    float tp_short = not na(near_sup) ? near_sup : not na(near_d_react) ? near_d_react : na
+
+    float risk_long = close - sl_long
+    float risk_short = sl_short - close
+
+    float rr_long = not na(tp_long) and risk_long > 0 ? (tp_long - close) / risk_long : na
+    float rr_short = not na(tp_short) and risk_short > 0 ? (close - tp_short) / risk_short : na
+
+    bool valid_rr_long = not na(rr_long) and rr_long >= min_rr
+    bool valid_rr_short = not na(rr_short) and rr_short >= min_rr
+
+    if can_long and valid_rr_long
+        strategy.entry("Long", strategy.long)
+        strategy.exit("LongExit", "Long", stop=sl_long, limit=tp_long)
+        active_sl := sl_long
+        active_tp := tp_long
+
+    else if can_short and valid_rr_short
+        strategy.entry("Short", strategy.short)
+        strategy.exit("ShortExit", "Short", stop=sl_short, limit=tp_short)
+        active_sl := sl_short
+        active_tp := tp_short
+
+if strategy.position_size == 0
+    active_sl := na
+    active_tp := na
+
+// ==========================================
+// 8. CLEAN VISUALS
+// ==========================================
+plot(show_ema ? ema_val : na, "EMA", color=color.blue, linewidth=2)
+
+// Sweep markers via plotshape (must be at top level, not inside if blocks)
+plotshape(show_sweeps and swept_sup, title="Swept Sup", style=shape.labelup, location=location.belowbar, color=color.green, text="SWP", size=size.tiny)
+plotshape(show_sweeps and swept_res, title="Swept Res", style=shape.labeldown, location=location.abovebar, color=color.red, text="SWP", size=size.tiny)
+plotshape(show_bos and bos_long, title="BOS Long", style=shape.triangleup, location=location.belowbar, color=color.blue, size=size.tiny)
+plotshape(show_bos and bos_short, title="BOS Short", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+
+// Zone boxes (only draw on last bar to avoid object overflow)
+var box[] zone_boxes = array.new_box()
+
+if barstate.islast and show_zones
+    // Delete old zone boxes
+    if array.size(zone_boxes) > 0
+        for i = 0 to array.size(zone_boxes) - 1
+            box.delete(array.get(zone_boxes, i))
+    array.clear(zone_boxes)
+    // Draw support zones
+    if array.size(supp_zones) > 0
+        for i = 0 to array.size(supp_zones) - 1
+            float val = array.get(supp_zones, i)
+            int leftBar = math.max(bar_index - 50, 0)
+            box b = box.new(leftBar, val + atr_val * 0.3, bar_index + 5, val - atr_val * 0.3, bgcolor=color.new(color.green, 80), border_color=na, extend=extend.right)
+            array.push(zone_boxes, b)
+    // Draw resistance zones
+    if array.size(res_zones) > 0
+        for i = 0 to array.size(res_zones) - 1
+            float val = array.get(res_zones, i)
+            int leftBar = math.max(bar_index - 50, 0)
+            box b = box.new(leftBar, val + atr_val * 0.3, bar_index + 5, val - atr_val * 0.3, bgcolor=color.new(color.red, 80), border_color=na, extend=extend.right)
+            array.push(zone_boxes, b)
+
+// Trade level lines
+var line entry_ln = na
+var line sl_ln = na
+var line tp_ln = na
+var label entry_lbl = na
+
+if show_trade_levels
+    if strategy.position_size != 0 and not na(active_sl) and not na(active_tp)
+        if na(entry_ln)
+            entry_ln := line.new(bar_index, strategy.position_avg_price, bar_index + 25, strategy.position_avg_price, color=color.blue, width=2, extend=extend.right)
+            sl_ln := line.new(bar_index, active_sl, bar_index + 25, active_sl, color=color.red, width=2, extend=extend.right)
+            tp_ln := line.new(bar_index, active_tp, bar_index + 25, active_tp, color=color.green, width=2, extend=extend.right)
+            string lbl_text = strategy.position_size > 0 ? "LONG" : "SHORT"
+            color lbl_color = strategy.position_size > 0 ? color.green : color.red
+            label.style lbl_style = strategy.position_size > 0 ? label.style_label_up : label.style_label_down
+            float lbl_y = strategy.position_size > 0 ? low : high
+            entry_lbl := label.new(bar_index, lbl_y, lbl_text, color=lbl_color, textcolor=color.white, style=lbl_style)
+        else
+            line.set_x1(entry_ln, bar_index)
+            line.set_x2(entry_ln, bar_index + 25)
+            line.set_x1(sl_ln, bar_index)
+            line.set_x2(sl_ln, bar_index + 25)
+            line.set_x1(tp_ln, bar_index)
+            line.set_x2(tp_ln, bar_index + 25)
+            label.set_x(entry_lbl, bar_index)
+            label.set_y(entry_lbl, strategy.position_size > 0 ? low : high)
+    else
+        if not na(entry_ln)
+            line.delete(entry_ln)
+            entry_ln := na
+        if not na(sl_ln)
+            line.delete(sl_ln)
+            sl_ln := na
+        if not na(tp_ln)
+            line.delete(tp_ln)
+            tp_ln := na
+        if not na(entry_lbl)
+            label.delete(entry_lbl)
+            entry_lbl := na
+
+// ==========================================
+// 9. DASHBOARD
+// ==========================================
+if show_dashboard and barstate.islast
+    var table dash = table.new(position.top_right, 2, 12, bgcolor=color.new(#0D1117, 85), border_color=color.gray, border_width=1)
+
+    table.cell(dash, 0, 0, "SWING STRATEGY", text_color=color.white, bgcolor=color.new(color.blue, 30))
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    table.cell(dash, 0, 1, "Symbol / TF", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 1, syminfo.ticker + " | " + timeframe.period, text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 2, "Weekly Bias", text_color=color.gray, text_size=size.small)
+    color bias_col = str.contains(w_exp, "BULL") ? color.lime : str.contains(w_exp, "BEAR") ? color.red : color.gray
+    table.cell(dash, 1, 2, w_exp, text_color=bias_col, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Daily Alignment", text_color=color.gray, text_size=size.small)
+    string d_txt = d_aligned ? "CONFIRMED" : "NEUTRAL"
+    color d_col = d_aligned ? color.lime : color.gray
+    table.cell(dash, 1, 3, d_txt, text_color=d_col, text_size=size.small)
+
+    table.cell(dash, 0, 4, "Nearest Support", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 4, not na(near_sup) ? str.tostring(near_sup, format.mintick) : "N/A", text_color=color.green, text_size=size.small)
+
+    table.cell(dash, 0, 5, "Nearest Resistance", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 5, not na(near_res) ? str.tostring(near_res, format.mintick) : "N/A", text_color=color.red, text_size=size.small)
+
+    table.cell(dash, 0, 6, "Setup Grade", text_color=color.gray, text_size=size.small)
+    color grade_col = grade == "A" or grade == "B" ? color.lime : grade == "C" ? color.orange : color.red
+    table.cell(dash, 1, 6, grade + " (" + str.tostring(score) + ")", text_color=grade_col, text_size=size.small)
+
+    table.cell(dash, 0, 7, "Status", text_color=color.gray, text_size=size.small)
+    string stat = strategy.position_size > 0 ? "LONG LIVE" : strategy.position_size < 0 ? "SHORT LIVE" : "SCANNING"
+    color stat_col = str.contains(stat, "LONG") ? color.green : str.contains(stat, "SHORT") ? color.red : color.gray
+    table.cell(dash, 1, 7, stat, text_color=stat_col, text_size=size.small)
+
+    table.cell(dash, 0, 8, "Win Rate / PF", text_color=color.gray, text_size=size.small)
+    float win_rate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades * 100) : 0.0
+    float pf = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 1.0
+    table.cell(dash, 1, 8, str.tostring(win_rate, "#.#") + "% | " + str.tostring(pf, "#.##") + " PF", text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 9, "Net Profit", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 9, str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? color.lime : color.red, text_size=size.small)
+
+    table.cell(dash, 0, 10, "Max Drawdown", text_color=color.gray, text_size=size.small)
+    float dd_pct = strategy.initial_capital > 0 ? (strategy.max_drawdown / strategy.initial_capital) * 100 : 0.0
+    table.cell(dash, 1, 10, str.tostring(dd_pct, "#.#") + "%", text_color=color.orange, text_size=size.small)
+
+    table.cell(dash, 0, 11, "Trades", text_color=color.gray, text_size=size.small)
+    table.cell(dash, 1, 11, str.tostring(strategy.closedtrades), text_color=color.white, text_size=size.small)
+
+// --- End ---
