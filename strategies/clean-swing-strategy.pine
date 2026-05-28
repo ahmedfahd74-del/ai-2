@@ -169,12 +169,16 @@ string grade = score >= 80 ? "A" : score >= 65 ? "B" : score >= 50 ? "C" : score
 var float active_sl = na
 var float active_tp = na
 
+// Pre-calculate for use inside conditional scope
+float lowest_10 = ta.lowest(low, 10)
+float highest_10 = ta.highest(high, 10)
+
 if barstate.isconfirmed and strategy.position_size == 0
     bool can_long = long_bias and not na(near_sup) and (not use_sweep or swept_sup) and (not use_bos or bos_long)
     bool can_short = short_bias and not na(near_res) and (not use_sweep or swept_res) and (not use_bos or bos_short)
 
-    float sl_long = nz(near_sup, ta.lowest(low, 10)) - atr_val * zone_mult
-    float sl_short = nz(near_res, ta.highest(high, 10)) + atr_val * zone_mult
+    float sl_long = nz(near_sup, lowest_10) - atr_val * zone_mult
+    float sl_short = nz(near_res, highest_10) + atr_val * zone_mult
 
     float tp_long = not na(near_res) ? near_res : not na(near_w_tgt) ? near_w_tgt : na
     float tp_short = not na(near_sup) ? near_sup : not na(near_d_react) ? near_d_react : na
@@ -253,9 +257,8 @@ if show_trade_levels
             tp_ln := line.new(bar_index, active_tp, bar_index + 25, active_tp, color=color.green, width=2, extend=extend.right)
             string lbl_text = strategy.position_size > 0 ? "LONG" : "SHORT"
             color lbl_color = strategy.position_size > 0 ? color.green : color.red
-            label.style lbl_style = strategy.position_size > 0 ? label.style_label_up : label.style_label_down
             float lbl_y = strategy.position_size > 0 ? low : high
-            entry_lbl := label.new(bar_index, lbl_y, lbl_text, color=lbl_color, textcolor=color.white, style=lbl_style)
+            entry_lbl := label.new(bar_index, lbl_y, lbl_text, color=lbl_color, textcolor=color.white, style=strategy.position_size > 0 ? label.style_label_up : label.style_label_down)
         else
             line.set_x1(entry_ln, bar_index)
             line.set_x2(entry_ln, bar_index + 25)
