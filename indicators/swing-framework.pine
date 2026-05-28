@@ -4,18 +4,23 @@
 // A comprehensive Pine Script v5 swing trading indicator that combines:
 //   - Weekly bias detection via pivot structure
 //   - Daily alignment confirmation
-//   - Support/Resistance from chart-timeframe pivots
+//   - Multi-level Support/Resistance from chart-timeframe pivots
 //   - EMA trend filter
-//   - Liquidity sweep detection
+//   - Liquidity sweep detection with volume confirmation
 //   - Full entry/SL/TP calculation with configurable R:R
+//   - Session/Kill Zone filtering (London, New York)
+//   - Signal expiry management
+//   - Partial position / trailing stop concept (TP1 hit -> move SL to BE)
 //
 // Features:
 //   - Non-repainting signals using barstate.isconfirmed
 //   - Anti-repaint MTF data via barmerge.lookahead_off
-//   - Dashboard with complete trade state
+//   - Dashboard with complete trade state (17 rows)
 //   - Visual trade levels (entry, SL, TP1, TP2)
+//   - Multi-level S/R plotting (up to 3 each, different line styles)
+//   - Alert conditions and dynamic JSON alerts
 //
-// Version: 1.0
+// Version: 2.0
 // ============================================================================
 
 //@version=5
@@ -23,6 +28,7 @@ indicator("Swing Trading Framework", overlay=true, max_lines_count=500, max_labe
 
 // --- Inputs ---
 
+// Core Settings
 emaLength       = input.int(50, "EMA Length", minval=1)
 weeklyEmaLength = input.int(21, "Weekly EMA Length", minval=1)
 dailyEmaLength  = input.int(21, "Daily EMA Length", minval=1)
@@ -34,6 +40,20 @@ rr1             = input.float(2.0, "Risk:Reward 1", minval=0.5, step=0.5)
 rr2             = input.float(3.0, "Risk:Reward 2", minval=1.0, step=0.5)
 useLiquiditySweep = input.bool(true, "Use Liquidity Sweep Filter")
 htfPivotLength  = input.int(3, "HTF Pivot Length", minval=1, maxval=10)
+
+// Kill Zones
+useKillZones     = input.bool(true, "Use Kill Zone Filter", group="Kill Zones")
+killZoneTimezone = input.string("America/New_York", "Kill Zone Timezone", options=["America/New_York", "Europe/London", "UTC"], group="Kill Zones")
+londonSession    = input.session("0200-0500", "London Session", group="Kill Zones")
+nySession        = input.session("0830-1100", "New York Session", group="Kill Zones")
+
+// Volume
+useVolumeSweepFilter = input.bool(true, "Volume Confirmation for Sweeps", group="Volume", tooltip="Require volume spike on sweep bar")
+volumeSweepMult      = input.float(1.5, "Volume Sweep Multiplier", minval=0.5, step=0.1, group="Volume", tooltip="Volume on sweep bar must exceed this multiple of average volume")
+volumeSmaLength      = input.int(20, "Volume SMA Length", minval=1, group="Volume")
+
+// Signal Management
+signalExpiryBars = input.int(10, "Signal Expiry (bars)", minval=1, group="Signal Management", tooltip="Signal expires after this many bars if not acted on")
 
 // --- Constants ---
 
@@ -53,6 +73,19 @@ isBelowEma = close < emaValue
 // --- ATR Calculation ---
 
 atrValue = ta.atr(atrLength)
+
+// --- Kill Zone Detection ---
+
+bool inLondonKZ = not na(time(timeframe.period, londonSession, killZoneTimezone))
+bool inNyKZ     = not na(time(timeframe.period, nySession, killZoneTimezone))
+bool inAnyKZ    = inLondonKZ or inNyKZ
+
+// Kill zone status string for dashboard
+string killZoneStatus = useKillZones ? (inLondonKZ ? "London" : inNyKZ ? "NY" : "Off-Hours") : "Disabled"
+
+// --- Volume SMA for Sweep Confirmation ---
+
+float volumeSma = ta.sma(volume, volumeSmaLength)
 
 // --- Section 1: Weekly Bias ---
 
@@ -129,39 +162,78 @@ if not na(dailyClose) and not na(dailyEma)
 else
     dailyAlignment := NEUTRAL
 
-// --- Section 3: Support / Resistance ---
+// --- Section 3: Multi-Level Support / Resistance ---
 
 // Detect pivots on chart timeframe
 pivotHigh = ta.pivothigh(high, pivotLeftBars, pivotRightBars)
 pivotLow  = ta.pivotlow(low, pivotLeftBars, pivotRightBars)
 
-// Store most recent confirmed pivot levels
-var float resistanceLevel = na
-var float supportLevel    = na
+// Store last 3 support and resistance levels
+var float[] supportLevels    = array.new_float(0)
+var float[] resistanceLevels = array.new_float(0)
 
 if not na(pivotHigh)
-    resistanceLevel := pivotHigh
+    array.push(resistanceLevels, pivotHigh)
+    if array.size(resistanceLevels) > 3
+        array.shift(resistanceLevels)
 
 if not na(pivotLow)
-    supportLevel := pivotLow
+    array.push(supportLevels, pivotLow)
+    if array.size(supportLevels) > 3
+        array.shift(supportLevels)
+
+// Find nearest support below price and nearest resistance above price
+float nearestSupport    = na
+float nearestResistance = na
+
+if array.size(supportLevels) > 0
+    for i = 0 to array.size(supportLevels) - 1
+        float lvl = array.get(supportLevels, i)
+        if lvl < close
+            if na(nearestSupport) or lvl > nearestSupport
+                nearestSupport := lvl
+
+if array.size(resistanceLevels) > 0
+    for i = 0 to array.size(resistanceLevels) - 1
+        float lvl = array.get(resistanceLevels, i)
+        if lvl > close
+            if na(nearestResistance) or lvl < nearestResistance
+                nearestResistance := lvl
+
+// Fallback: if no level found on correct side, use most recent
+if na(nearestSupport) and array.size(supportLevels) > 0
+    nearestSupport := array.get(supportLevels, array.size(supportLevels) - 1)
+
+if na(nearestResistance) and array.size(resistanceLevels) > 0
+    nearestResistance := array.get(resistanceLevels, array.size(resistanceLevels) - 1)
+
+// Legacy variable names for compatibility with trade logic
+float supportLevel    = nearestSupport
+float resistanceLevel = nearestResistance
 
 // --- Section 4: EMA Filter ---
 
 string emaStatus = isAboveEma ? BULLISH : isBelowEma ? BEARISH : NEUTRAL
 
-// --- Section 5: Liquidity Sweep Detection ---
+// --- Section 5: Liquidity Sweep Detection (with Volume Confirmation) ---
 
 var string sweepStatus = "None"
+var bool sweepVolumeConfirmed = false
 
 if barstate.isconfirmed
     // Bullish sweep: wick below support, close back above
     if useLiquiditySweep and not na(supportLevel) and low < supportLevel and close > supportLevel
+        bool volOk = useVolumeSweepFilter ? (volume > volumeSma * volumeSweepMult) : true
         sweepStatus := BULLISH
+        sweepVolumeConfirmed := volOk
     // Bearish sweep: wick above resistance, close back below
     else if useLiquiditySweep and not na(resistanceLevel) and high > resistanceLevel and close < resistanceLevel
+        bool volOk = useVolumeSweepFilter ? (volume > volumeSma * volumeSweepMult) : true
         sweepStatus := BEARISH
+        sweepVolumeConfirmed := volOk
     else
         sweepStatus := "None"
+        sweepVolumeConfirmed := false
 
 // --- Section 6: Entry / SL / TP Logic ---
 
@@ -171,45 +243,87 @@ var float slPrice      = na
 var float tp1Price     = na
 var float tp2Price     = na
 
+// Signal expiry tracking
+var int signalBar = na
+
+// TP1 hit tracking (partial position / trailing concept)
+var bool tp1Hit = false
+
 // Condition checks for long setup
 bool longWeeklyOk    = weeklyBias == BULLISH or (weeklyBias == NEUTRAL and dailyAlignment == BULLISH)
 bool longDailyOk     = dailyAlignment == BULLISH
 bool longEmaOk       = isAboveEma
 bool longSupportOk   = not na(supportLevel) and (close > supportLevel or (low < supportLevel and close > supportLevel))
-bool longSweepOk     = useLiquiditySweep ? sweepStatus == BULLISH : true
+bool longSweepOk     = useLiquiditySweep ? (sweepStatus == BULLISH and (useVolumeSweepFilter ? sweepVolumeConfirmed : true)) : true
 
 // Condition checks for short setup
 bool shortWeeklyOk   = weeklyBias == BEARISH or (weeklyBias == NEUTRAL and dailyAlignment == BEARISH)
 bool shortDailyOk    = dailyAlignment == BEARISH
 bool shortEmaOk      = isBelowEma
 bool shortResistOk   = not na(resistanceLevel) and (close < resistanceLevel or (high > resistanceLevel and close < resistanceLevel))
-bool shortSweepOk    = useLiquiditySweep ? sweepStatus == BEARISH : true
+bool shortSweepOk    = useLiquiditySweep ? (sweepStatus == BEARISH and (useVolumeSweepFilter ? sweepVolumeConfirmed : true)) : true
+
+// Kill zone gating
+bool killZoneOk = useKillZones ? inAnyKZ : true
 
 // --- Section 7: Trade Status Determination ---
 
 if barstate.isconfirmed
-    if longWeeklyOk and longDailyOk and longEmaOk and longSupportOk and longSweepOk
+    // Signal expiry check: reset if signal has been active too long
+    if tradeStatus != NO_SETUP and not na(signalBar) and (bar_index - signalBar > signalExpiryBars)
+        tradeStatus := NO_SETUP
+        entryPrice  := na
+        slPrice     := na
+        tp1Price    := na
+        tp2Price    := na
+        signalBar   := na
+        tp1Hit      := false
+
+    // New signal generation (only in kill zones if enabled)
+    if killZoneOk and longWeeklyOk and longDailyOk and longEmaOk and longSupportOk and longSweepOk
         tradeStatus := LONG_READY
         entryPrice  := close
         slPrice     := supportLevel - atrValue * atrMultiplier
         tp1Price    := close + (close - slPrice) * rr1
         tp2Price    := close + (close - slPrice) * rr2
-    else if shortWeeklyOk and shortDailyOk and shortEmaOk and shortResistOk and shortSweepOk
+        signalBar   := bar_index
+        tp1Hit      := false
+    else if killZoneOk and shortWeeklyOk and shortDailyOk and shortEmaOk and shortResistOk and shortSweepOk
         tradeStatus := SHORT_READY
         entryPrice  := close
         slPrice     := resistanceLevel + atrValue * atrMultiplier
         tp1Price    := close - (slPrice - close) * rr1
         tp2Price    := close - (slPrice - close) * rr2
-    else
+        signalBar   := bar_index
+        tp1Hit      := false
+    else if tradeStatus == NO_SETUP
         tradeStatus := NO_SETUP
         entryPrice  := na
         slPrice     := na
         tp1Price    := na
         tp2Price    := na
 
+// --- Section 7b: TP1 Hit Detection and Trailing Stop ---
+
+// Check if TP1 has been hit while signal is active
+if tradeStatus == LONG_READY and not na(tp1Price) and not tp1Hit
+    if high >= tp1Price
+        tp1Hit := true
+        // Move SL to breakeven (entry price)
+        slPrice := entryPrice
+
+if tradeStatus == SHORT_READY and not na(tp1Price) and not tp1Hit
+    if low <= tp1Price
+        tp1Hit := true
+        // Move SL to breakeven (entry price)
+        slPrice := entryPrice
+
+// Signal age calculation
+int signalAge = (tradeStatus != NO_SETUP and not na(signalBar)) ? (bar_index - signalBar) : na
+
 // --- Section 8: Dashboard ---
 
-var table dashboard = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
+var table dashboard = table.new(position.top_right, 2, 17, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
 
 // Helper function for bias coloring
 colorForBias(string bias) =>
@@ -239,48 +353,70 @@ if barstate.islast
     color emaColor = isAboveEma ? color.green : color.red
     table.cell(dashboard, 1, 4, emaText, text_color=emaColor, text_size=size.small)
 
-    // Row 5: Support
-    table.cell(dashboard, 0, 5, "Support", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 5, not na(supportLevel) ? str.tostring(supportLevel, format.mintick) : "---", text_color=color.green, text_size=size.small)
+    // Row 5: Kill Zone
+    table.cell(dashboard, 0, 5, "Kill Zone", text_color=color.white, text_size=size.small)
+    color kzColor = killZoneStatus == "London" ? color.yellow : killZoneStatus == "NY" ? color.orange : killZoneStatus == "Disabled" ? color.gray : color.silver
+    table.cell(dashboard, 1, 5, killZoneStatus, text_color=kzColor, text_size=size.small)
 
-    // Row 6: Resistance
-    table.cell(dashboard, 0, 6, "Resistance", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 6, not na(resistanceLevel) ? str.tostring(resistanceLevel, format.mintick) : "---", text_color=color.red, text_size=size.small)
+    // Row 6: Nearest Support
+    table.cell(dashboard, 0, 6, "Nearest S", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 6, not na(nearestSupport) ? str.tostring(nearestSupport, format.mintick) : "---", text_color=color.green, text_size=size.small)
 
-    // Row 7: Liquidity Sweep
-    table.cell(dashboard, 0, 7, "Liq. Sweep", text_color=color.white, text_size=size.small)
+    // Row 7: Nearest Resistance
+    table.cell(dashboard, 0, 7, "Nearest R", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 7, not na(nearestResistance) ? str.tostring(nearestResistance, format.mintick) : "---", text_color=color.red, text_size=size.small)
+
+    // Row 8: Liquidity Sweep (with volume status)
+    table.cell(dashboard, 0, 8, "Liq. Sweep", text_color=color.white, text_size=size.small)
+    string sweepText = sweepStatus == "None" ? "None" : sweepStatus + (sweepVolumeConfirmed ? " (Vol)" : " (No Vol)")
     color sweepColor = sweepStatus == BULLISH ? color.green : sweepStatus == BEARISH ? color.red : color.gray
-    table.cell(dashboard, 1, 7, sweepStatus, text_color=sweepColor, text_size=size.small)
+    table.cell(dashboard, 1, 8, sweepText, text_color=sweepColor, text_size=size.small)
 
-    // Row 8: Entry
-    table.cell(dashboard, 0, 8, "Entry", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 8, not na(entryPrice) ? str.tostring(entryPrice, format.mintick) : "---", text_color=color.white, text_size=size.small)
+    // Row 9: Entry
+    table.cell(dashboard, 0, 9, "Entry", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 9, not na(entryPrice) ? str.tostring(entryPrice, format.mintick) : "---", text_color=color.white, text_size=size.small)
 
-    // Row 9: Stop Loss
-    table.cell(dashboard, 0, 9, "Stop Loss", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 9, not na(slPrice) ? str.tostring(slPrice, format.mintick) : "---", text_color=color.red, text_size=size.small)
+    // Row 10: Stop Loss
+    table.cell(dashboard, 0, 10, "Stop Loss", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 10, not na(slPrice) ? str.tostring(slPrice, format.mintick) : "---", text_color=color.red, text_size=size.small)
 
-    // Row 10: TP1
-    table.cell(dashboard, 0, 10, "TP1", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 10, not na(tp1Price) ? str.tostring(tp1Price, format.mintick) : "---", text_color=color.green, text_size=size.small)
+    // Row 11: TP1
+    table.cell(dashboard, 0, 11, "TP1", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 11, not na(tp1Price) ? str.tostring(tp1Price, format.mintick) : "---", text_color=color.green, text_size=size.small)
 
-    // Row 11: TP2
-    table.cell(dashboard, 0, 11, "TP2", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 11, not na(tp2Price) ? str.tostring(tp2Price, format.mintick) : "---", text_color=color.lime, text_size=size.small)
+    // Row 12: TP2
+    table.cell(dashboard, 0, 12, "TP2", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 12, not na(tp2Price) ? str.tostring(tp2Price, format.mintick) : "---", text_color=color.lime, text_size=size.small)
 
-    // Row 12: RR
-    table.cell(dashboard, 0, 12, "RR", text_color=color.white, text_size=size.small)
+    // Row 13: RR
+    table.cell(dashboard, 0, 13, "RR", text_color=color.white, text_size=size.small)
     string rrText = "---"
     if not na(entryPrice) and not na(slPrice) and math.abs(entryPrice - slPrice) > 0
         float risk = math.abs(entryPrice - slPrice)
         float reward = not na(tp1Price) ? math.abs(tp1Price - entryPrice) : 0.0
         rrText := str.tostring(reward / risk, "#.##") + "R"
-    table.cell(dashboard, 1, 12, rrText, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 13, rrText, text_color=color.white, text_size=size.small)
 
-    // Row 13: Status
-    table.cell(dashboard, 0, 13, "Status", text_color=color.white, text_size=size.small)
+    // Row 14: Signal Age
+    table.cell(dashboard, 0, 14, "Signal Age", text_color=color.white, text_size=size.small)
+    string ageText = not na(signalAge) ? str.tostring(signalAge) + " bars" : "---"
+    color ageColor = not na(signalAge) ? (signalAge > signalExpiryBars - 3 ? color.orange : color.white) : color.gray
+    table.cell(dashboard, 1, 14, ageText, text_color=ageColor, text_size=size.small)
+
+    // Row 15: TP1 Status
+    table.cell(dashboard, 0, 15, "TP1 Status", text_color=color.white, text_size=size.small)
+    string tp1Text = tradeStatus == NO_SETUP ? "---" : (tp1Hit ? "TP1 Hit" : "Pending")
+    color tp1Color = tp1Hit ? color.lime : (tradeStatus != NO_SETUP ? color.yellow : color.gray)
+    table.cell(dashboard, 1, 15, tp1Text, text_color=tp1Color, text_size=size.small)
+
+    // Row 16: Status
+    table.cell(dashboard, 0, 16, "Status", text_color=color.white, text_size=size.small)
+    string statusText = tradeStatus
     color statusColor = tradeStatus == LONG_READY ? color.green : tradeStatus == SHORT_READY ? color.red : color.gray
-    table.cell(dashboard, 1, 13, tradeStatus, text_color=statusColor, text_size=size.small)
+    if tp1Hit and tradeStatus != NO_SETUP
+        statusText := "TP1 HIT - TRAIL"
+        statusColor := color.lime
+    table.cell(dashboard, 1, 16, statusText, text_color=statusColor, text_size=size.small)
 
 // --- Section 9: Chart Visuals ---
 
@@ -288,20 +424,69 @@ if barstate.islast
 emaPlotColor = close > emaValue ? color.green : color.red
 plot(emaValue, "EMA", color=emaPlotColor, linewidth=2)
 
-// Support and Resistance lines
-var line supportLine    = na
-var line resistanceLine = na
+// Multi-level Support lines (up to 3, different styles and shades)
+var line supportLine1 = na
+var line supportLine2 = na
+var line supportLine3 = na
 
-// Update support line when level changes
-if not na(supportLevel)
-    if not na(supportLine)
-        line.delete(supportLine)
-    supportLine := line.new(bar_index - 1, supportLevel, bar_index, supportLevel, color=color.green, style=line.style_dashed, width=1, extend=extend.both)
+// Multi-level Resistance lines (up to 3, different styles and shades)
+var line resistLine1 = na
+var line resistLine2 = na
+var line resistLine3 = na
 
-if not na(resistanceLevel)
-    if not na(resistanceLine)
-        line.delete(resistanceLine)
-    resistanceLine := line.new(bar_index - 1, resistanceLevel, bar_index, resistanceLevel, color=color.red, style=line.style_dashed, width=1, extend=extend.both)
+// Support line colors (green shades: most recent = brightest)
+color supColor1 = color.green
+color supColor2 = color.new(color.green, 40)
+color supColor3 = color.new(color.green, 70)
+
+// Resistance line colors (red shades: most recent = brightest)
+color resColor1 = color.red
+color resColor2 = color.new(color.red, 40)
+color resColor3 = color.new(color.red, 70)
+
+// Delete and redraw support levels
+if not na(supportLine1)
+    line.delete(supportLine1)
+    supportLine1 := na
+if not na(supportLine2)
+    line.delete(supportLine2)
+    supportLine2 := na
+if not na(supportLine3)
+    line.delete(supportLine3)
+    supportLine3 := na
+
+int supSize = array.size(supportLevels)
+if supSize >= 1
+    // Most recent = solid
+    supportLine1 := line.new(bar_index - 1, array.get(supportLevels, supSize - 1), bar_index, array.get(supportLevels, supSize - 1), color=supColor1, style=line.style_solid, width=1, extend=extend.both)
+if supSize >= 2
+    // Second = dashed
+    supportLine2 := line.new(bar_index - 1, array.get(supportLevels, supSize - 2), bar_index, array.get(supportLevels, supSize - 2), color=supColor2, style=line.style_dashed, width=1, extend=extend.both)
+if supSize >= 3
+    // Third = dotted
+    supportLine3 := line.new(bar_index - 1, array.get(supportLevels, supSize - 3), bar_index, array.get(supportLevels, supSize - 3), color=supColor3, style=line.style_dotted, width=1, extend=extend.both)
+
+// Delete and redraw resistance levels
+if not na(resistLine1)
+    line.delete(resistLine1)
+    resistLine1 := na
+if not na(resistLine2)
+    line.delete(resistLine2)
+    resistLine2 := na
+if not na(resistLine3)
+    line.delete(resistLine3)
+    resistLine3 := na
+
+int resSize = array.size(resistanceLevels)
+if resSize >= 1
+    // Most recent = solid
+    resistLine1 := line.new(bar_index - 1, array.get(resistanceLevels, resSize - 1), bar_index, array.get(resistanceLevels, resSize - 1), color=resColor1, style=line.style_solid, width=1, extend=extend.both)
+if resSize >= 2
+    // Second = dashed
+    resistLine2 := line.new(bar_index - 1, array.get(resistanceLevels, resSize - 2), bar_index, array.get(resistanceLevels, resSize - 2), color=resColor2, style=line.style_dashed, width=1, extend=extend.both)
+if resSize >= 3
+    // Third = dotted
+    resistLine3 := line.new(bar_index - 1, array.get(resistanceLevels, resSize - 3), bar_index, array.get(resistanceLevels, resSize - 3), color=resColor3, style=line.style_dotted, width=1, extend=extend.both)
 
 // Trade level lines and labels
 var line entryLine = na
@@ -348,7 +533,28 @@ if tradeStatus == SHORT_READY and not na(entryPrice) and not na(slPrice) and not
         tp2Line   := line.new(bar_index - 1, tp2Price, bar_index, tp2Price, color=color.lime, style=line.style_solid, width=1, extend=extend.both)
         tradeLbl  := label.new(bar_index, entryPrice, "SHORT READY", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.normal)
 
-// Update previous status tracker
+// Update SL line position when TP1 is hit (moved to breakeven)
+if tp1Hit and not na(slLine) and not na(entryPrice)
+    line.set_y1(slLine, entryPrice)
+    line.set_y2(slLine, entryPrice)
+    line.set_color(slLine, color.yellow)
+
+// --- Section 10: Alert Conditions ---
+
+// For alertcondition(), use [1] operator to compare with previous bar's value
+// (alertcondition evaluates using final bar values, so var-based tracking won't work)
+alertcondition(tradeStatus == LONG_READY and tradeStatus[1] != LONG_READY, title="Long Ready", message="Swing Framework: LONG READY on {{ticker}} at {{close}}")
+alertcondition(tradeStatus == SHORT_READY and tradeStatus[1] != SHORT_READY, title="Short Ready", message="Swing Framework: SHORT READY on {{ticker}} at {{close}}")
+alertcondition(tradeStatus == NO_SETUP and tradeStatus[1] != NO_SETUP, title="Setup Cleared", message="Swing Framework: Setup cleared on {{ticker}}")
+
+// Dynamic JSON alerts (use prevTradeStatus which still holds previous bar's value)
+if tradeStatus == LONG_READY and prevTradeStatus != LONG_READY
+    alert('{"ticker":"' + syminfo.ticker + '","signal":"LONG","entry":' + str.tostring(entryPrice) + ',"sl":' + str.tostring(slPrice) + ',"tp1":' + str.tostring(tp1Price) + ',"tp2":' + str.tostring(tp2Price) + '}', alert.freq_once_per_bar)
+
+if tradeStatus == SHORT_READY and prevTradeStatus != SHORT_READY
+    alert('{"ticker":"' + syminfo.ticker + '","signal":"SHORT","entry":' + str.tostring(entryPrice) + ',"sl":' + str.tostring(slPrice) + ',"tp1":' + str.tostring(tp1Price) + ',"tp2":' + str.tostring(tp2Price) + '}', alert.freq_once_per_bar)
+
+// Update previous status tracker (AFTER alerts are evaluated)
 prevTradeStatus := tradeStatus
 
 // --- End of Script ---
@@ -374,32 +580,62 @@ prevTradeStatus := tradeStatus
 //   Both conditions must agree for a directional alignment reading.
 //   This helps filter out ranging/choppy periods.
 //
+// MULTI-LEVEL SUPPORT/RESISTANCE:
+//   The indicator tracks the last 3 pivot highs and last 3 pivot lows on the
+//   chart timeframe. These are plotted with different line styles:
+//     - Most recent: solid line (full opacity)
+//     - Second: dashed line (medium opacity)
+//     - Third: dotted line (low opacity)
+//   For trade logic, the nearest support below price and nearest resistance
+//   above price are used. This provides more robust zone detection than a
+//   single-level approach.
+//
+// KILL ZONE FILTERING:
+//   When enabled, signals only fire during London (default 02:00-05:00 ET) or
+//   New York (default 08:30-11:00 ET) sessions. This reduces noise during
+//   low-volume off-hours. The timezone is configurable between New York,
+//   London, and UTC.
+//
+// VOLUME CONFIRMATION FOR SWEEPS:
+//   Liquidity sweep detection can optionally require that the sweep bar has
+//   volume exceeding a configurable multiple (default 1.5x) of the 20-period
+//   volume SMA. This filters out low-conviction sweeps that may be noise
+//   rather than genuine institutional activity.
+//
+// SIGNAL EXPIRY:
+//   Signals automatically expire after a configurable number of bars (default
+//   10). This prevents stale signals from persisting when market conditions
+//   have moved on. The dashboard shows signal age to help with timing.
+//
+// TP1 HIT / TRAILING CONCEPT:
+//   When price reaches the TP1 level after a signal fires, the indicator:
+//     1. Marks TP1 as hit in the dashboard
+//     2. Moves the stop loss line to breakeven (entry price)
+//     3. Changes the status display to "TP1 HIT - TRAIL"
+//   This represents the common practice of taking partial profit at TP1 and
+//   trailing the remainder with a breakeven stop.
+//
+// ALERT SYSTEM:
+//   The indicator provides both static alertcondition() calls (for
+//   TradingView's built-in alert system) and dynamic alert() calls with
+//   JSON payloads containing ticker, signal direction, entry, SL, TP1, TP2.
+//   JSON alerts fire once per bar to avoid spam.
+//
 // LIMITATIONS:
 //   - Weekly and daily pivots require sufficient history to form. The indicator
 //     will show Neutral bias until at least two pivots confirm on each timeframe.
 //   - Liquidity sweep detection is simplified: it checks if a single bar wicks
 //     beyond support/resistance and closes back inside. Multi-bar sweeps or
 //     accumulation patterns are not detected.
-//   - Support/Resistance levels are based on the most recent chart-timeframe
-//     pivot only. Multiple S/R zones or zone clustering is not implemented.
 //   - The indicator does not manage actual trades. "LONG READY" and "SHORT READY"
 //     are signal states, not automatic entries.
-//   - No session/kill zone filtering is applied. Signals can fire at any time.
 //   - The R:R calculation assumes the stop loss is placed at the exact
 //     support/resistance level minus/plus ATR buffer. Actual fills may differ.
 //   - Pine Script v5 does not have User Defined Types (UDTs), so state is
 //     managed via individual var variables rather than structured types.
-//
-// SUGGESTIONS FOR IMPROVEMENT:
-//   - Add session/kill zone filtering (London, New York opens) to reduce
-//     noise during low-volume periods.
-//   - Implement multi-level S/R tracking (e.g., keep last N pivot highs/lows)
-//     for more robust zone detection.
-//   - Add volume confirmation for liquidity sweeps (volume spike on sweep bar).
-//   - Add partial position management logic (scale out at TP1, trail to TP2).
-//   - Consider adding alerts via alertcondition() for LONG READY/SHORT READY.
-//   - Add a higher-timeframe order block or FVG filter for more precise entries.
-//   - Track how many bars since the last signal to implement signal expiry.
-//   - Add divergence detection (RSI/MACD vs price) as additional confluence.
+//   - Kill zone session times are approximate; they represent typical
+//     high-volume windows but actual volatility may vary day to day.
+//   - The trailing stop concept is visual only; no actual position management
+//     or broker integration is performed.
 //
 // ============================================================================
