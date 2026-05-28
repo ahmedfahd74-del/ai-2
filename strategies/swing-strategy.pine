@@ -1,0 +1,640 @@
+// ============================================================================
+// SWING STRATEGY PRO
+// ============================================================================
+// A backtestable Pine Script v5 strategy focused on:
+//   - Weekly bias detection via pivot structure
+//   - Daily alignment confirmation
+//   - Zone-based support/resistance (thick boxes, not thin lines)
+//   - Liquidity sweep detection with volume confirmation
+//   - Break of Structure (BOS) confirmation (optional)
+//   - Setup quality scoring (0-100)
+//   - Real strategy.entry() / strategy.exit() calls
+//   - Breakeven and trailing stop logic
+//   - Performance dashboard with win rate, profit factor, drawdown
+//   - Clean chart with minimal visuals
+//
+// Version: 1.0
+// ============================================================================
+
+//@version=5
+strategy("Swing Strategy Pro", overlay=true, pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.04, slippage=2, process_orders_on_close=true, max_boxes_count=100, max_lines_count=100, max_labels_count=50)
+
+// --- Inputs: Core Settings ---
+emaLength       = input.int(50, "EMA Length", minval=1, group="Core Settings")
+atrLength       = input.int(14, "ATR Length", minval=1, group="Core Settings")
+atrMultiplier   = input.float(1.5, "SL ATR buffer", minval=0.1, step=0.1, group="Core Settings")
+htfPivotLength  = input.int(3, "HTF Pivot Length", minval=1, maxval=10, group="Core Settings")
+pivotLeftBars   = input.int(5, "Pivot Left Bars", minval=1, maxval=20, group="Core Settings")
+pivotRightBars  = input.int(5, "Pivot Right Bars", minval=1, maxval=20, group="Core Settings")
+
+// --- Inputs: Trade Mode ---
+tradeMode = input.string("Both", "Trade Mode", options=["Continuation", "Retracement", "Both"], group="Trade Mode")
+minRR     = input.float(1.5, "Minimum R:R to take trade", minval=1.0, step=0.1, group="Trade Mode")
+rr1       = input.float(2.0, "TP1 R:R", minval=0.5, step=0.5, group="Trade Mode")
+useDynamicTP = input.bool(true, "Use zone-based TP when available", group="Trade Mode")
+
+// --- Inputs: Entry Filters ---
+useLiquiditySweep  = input.bool(true, "Use Liquidity Sweep", group="Entry Filters")
+useBosConfirmation = input.bool(false, "Require Break of Structure", group="Entry Filters")
+useVolumeFilter    = input.bool(true, "Use Volume Filter", group="Entry Filters")
+volumeMult         = input.float(1.5, "Volume Multiplier", minval=0.5, step=0.1, group="Entry Filters")
+useKillZones       = input.bool(true, "Use Kill Zones", group="Entry Filters")
+killZoneTZ         = input.string("America/New_York", "Kill Zone Timezone", options=["America/New_York", "Europe/London", "UTC"], group="Entry Filters")
+londonSession      = input.session("0200-0500", "London Session", group="Entry Filters")
+nySession          = input.session("0830-1100", "NY Session", group="Entry Filters")
+minSetupScore      = input.int(60, "Minimum setup quality score (0-100)", minval=0, maxval=100, group="Entry Filters")
+
+// --- Inputs: Exit Logic ---
+useBreakeven    = input.bool(true, "Move SL to BE after TP1 level reached", group="Exit Logic")
+useTrailingStop = input.bool(false, "Use ATR trailing stop", group="Exit Logic")
+trailAtrMult    = input.float(2.0, "Trailing ATR Multiplier", minval=0.5, step=0.1, group="Exit Logic")
+
+// --- Inputs: Visuals ---
+showEMA               = input.bool(true, "Show EMA", group="Visuals")
+showSRZones           = input.bool(true, "Show S/R Zones", group="Visuals")
+showWeeklyTargetZones = input.bool(false, "Show Weekly Target Zones", group="Visuals")
+showDailyReactionZones = input.bool(false, "Show Daily Reaction Zones", group="Visuals")
+showEntryExitLines    = input.bool(true, "Show Entry/Exit Lines", group="Visuals")
+showDashboard         = input.bool(true, "Show Dashboard", group="Visuals")
+showHistoricalLabels  = input.bool(false, "Show Historical Labels", group="Visuals")
+
+// --- Constants ---
+string BULLISH  = "Bullish"
+string BEARISH  = "Bearish"
+string NEUTRAL  = "Neutral"
+string CONT     = "Continuation"
+string RETRACE  = "Retracement"
+
+// --- Core Calculations ---
+emaValue = ta.ema(close, emaLength)
+atrValue = ta.atr(atrLength)
+volSma   = ta.sma(volume, 20)
+
+// --- Section 1: Weekly Bias ---
+[weeklyHigh, weeklyLow, weeklyClose, weeklyEmaVal] = request.security(syminfo.tickerid, "W", [high, low, close, ta.ema(close, 21)], lookahead=barmerge.lookahead_off)
+
+weeklyPH = request.security(syminfo.tickerid, "W", ta.pivothigh(high, htfPivotLength, htfPivotLength), lookahead=barmerge.lookahead_off)
+weeklyPL = request.security(syminfo.tickerid, "W", ta.pivotlow(low, htfPivotLength, htfPivotLength), lookahead=barmerge.lookahead_off)
+
+var float lastWeeklyPH = na
+var float prevWeeklyPH = na
+var float lastWeeklyPL = na
+var float prevWeeklyPL = na
+
+if not na(weeklyPH)
+    prevWeeklyPH := lastWeeklyPH
+    lastWeeklyPH := weeklyPH
+
+if not na(weeklyPL)
+    prevWeeklyPL := lastWeeklyPL
+    lastWeeklyPL := weeklyPL
+
+// Weekly structure determination
+isWeeklyHH = not na(lastWeeklyPH) and not na(prevWeeklyPH) and lastWeeklyPH > prevWeeklyPH
+isWeeklyHL = not na(lastWeeklyPL) and not na(prevWeeklyPL) and lastWeeklyPL > prevWeeklyPL
+isWeeklyLH = not na(lastWeeklyPH) and not na(prevWeeklyPH) and lastWeeklyPH < prevWeeklyPH
+isWeeklyLL = not na(lastWeeklyPL) and not na(prevWeeklyPL) and lastWeeklyPL < prevWeeklyPL
+
+weeklyBullish = isWeeklyHH and isWeeklyHL
+weeklyBearish = isWeeklyLH and isWeeklyLL
+
+// Fallback to weekly close vs weekly EMA
+weeklyBullishFallback = not na(weeklyClose) and not na(weeklyEmaVal) and weeklyClose > weeklyEmaVal
+weeklyBearishFallback = not na(weeklyClose) and not na(weeklyEmaVal) and weeklyClose < weeklyEmaVal
+
+weeklyIsBullish = weeklyBullish or (not weeklyBullish and not weeklyBearish and weeklyBullishFallback)
+weeklyIsBearish = weeklyBearish or (not weeklyBullish and not weeklyBearish and weeklyBearishFallback)
+
+string weeklyBias = weeklyIsBullish ? BULLISH : weeklyIsBearish ? BEARISH : NEUTRAL
+
+// --- Section 2: Daily Alignment ---
+[dailyClose, dailyEmaVal] = request.security(syminfo.tickerid, "D", [close, ta.ema(close, 21)], lookahead=barmerge.lookahead_off)
+
+dailyPH = request.security(syminfo.tickerid, "D", ta.pivothigh(high, htfPivotLength, htfPivotLength), lookahead=barmerge.lookahead_off)
+dailyPL = request.security(syminfo.tickerid, "D", ta.pivotlow(low, htfPivotLength, htfPivotLength), lookahead=barmerge.lookahead_off)
+
+var float lastDailyPH = na
+var float prevDailyPH = na
+var float lastDailyPL = na
+var float prevDailyPL = na
+
+if not na(dailyPH)
+    prevDailyPH := lastDailyPH
+    lastDailyPH := dailyPH
+
+if not na(dailyPL)
+    prevDailyPL := lastDailyPL
+    lastDailyPL := dailyPL
+
+isDailyHH = not na(lastDailyPH) and not na(prevDailyPH) and lastDailyPH > prevDailyPH
+isDailyHL = not na(lastDailyPL) and not na(prevDailyPL) and lastDailyPL > prevDailyPL
+isDailyLH = not na(lastDailyPH) and not na(prevDailyPH) and lastDailyPH < prevDailyPH
+isDailyLL = not na(lastDailyPL) and not na(prevDailyPL) and lastDailyPL < prevDailyPL
+
+dailyBullish = (not na(dailyClose) and not na(dailyEmaVal) and dailyClose > dailyEmaVal) and (isDailyHH or (not na(lastDailyPH) and close > lastDailyPH))
+dailyBearish = (not na(dailyClose) and not na(dailyEmaVal) and dailyClose < dailyEmaVal) and (isDailyLL or (not na(lastDailyPL) and close < lastDailyPL))
+
+string dailyAlignment = dailyBullish ? BULLISH : dailyBearish ? BEARISH : NEUTRAL
+
+// Weekly expectation classification
+priceAboveWeeklyEma = not na(weeklyEmaVal) and close > weeklyEmaVal
+priceBelowWeeklyEma = not na(weeklyEmaVal) and close < weeklyEmaVal
+
+string weeklyExpectation = NEUTRAL
+if weeklyIsBullish and priceAboveWeeklyEma
+    weeklyExpectation := "Bullish Continuation"
+else if weeklyIsBearish and priceBelowWeeklyEma
+    weeklyExpectation := "Bearish Continuation"
+else if weeklyIsBearish and dailyBullish
+    weeklyExpectation := "Bullish Retracement"
+else if weeklyIsBullish and dailyBearish
+    weeklyExpectation := "Bearish Retracement"
+
+// --- Section 3: Support/Resistance Zones ---
+chartPH = ta.pivothigh(high, pivotLeftBars, pivotRightBars)
+chartPL = ta.pivotlow(low, pivotLeftBars, pivotRightBars)
+
+var float support1 = na
+var float support2 = na
+var float support3 = na
+var float resistance1 = na
+var float resistance2 = na
+var float resistance3 = na
+
+var int support1Bar = na
+var int support2Bar = na
+var int support3Bar = na
+var int resistance1Bar = na
+var int resistance2Bar = na
+var int resistance3Bar = na
+
+if not na(chartPL)
+    support3 := support2
+    support3Bar := support2Bar
+    support2 := support1
+    support2Bar := support1Bar
+    support1 := chartPL
+    support1Bar := bar_index - pivotRightBars
+
+if not na(chartPH)
+    resistance3 := resistance2
+    resistance3Bar := resistance2Bar
+    resistance2 := resistance1
+    resistance2Bar := resistance1Bar
+    resistance1 := chartPH
+    resistance1Bar := bar_index - pivotRightBars
+
+// Zone thickness
+zoneThickness = nz(atrValue) * 0.3
+
+// Nearest support and resistance
+nearestSupport    = nz(support1)
+nearestResistance = nz(resistance1)
+
+// Zone boundaries
+supportZoneTop    = nearestSupport + zoneThickness / 2
+supportZoneBottom = nearestSupport - zoneThickness / 2
+resistanceZoneTop    = nearestResistance + zoneThickness / 2
+resistanceZoneBottom = nearestResistance - zoneThickness / 2
+
+// Draw S/R zone boxes
+var box supportBox1 = na
+var box supportBox2 = na
+var box resistanceBox1 = na
+var box resistanceBox2 = na
+
+if showSRZones and barstate.islast
+    // Delete old boxes
+    if not na(supportBox1)
+        box.delete(supportBox1)
+    if not na(supportBox2)
+        box.delete(supportBox2)
+    if not na(resistanceBox1)
+        box.delete(resistanceBox1)
+    if not na(resistanceBox2)
+        box.delete(resistanceBox2)
+    
+    // Support zone 1
+    if not na(support1)
+        leftEdge1 = math.max(nz(support1Bar), bar_index - 500)
+        supportBox1 := box.new(leftEdge1, support1 + zoneThickness / 2, bar_index, support1 - zoneThickness / 2, border_color=color.new(color.green, 85), bgcolor=color.new(color.green, 85), extend=extend.right)
+    
+    // Support zone 2
+    if not na(support2)
+        leftEdge2 = math.max(nz(support2Bar), bar_index - 500)
+        supportBox2 := box.new(leftEdge2, support2 + zoneThickness / 2, bar_index, support2 - zoneThickness / 2, border_color=color.new(color.green, 85), bgcolor=color.new(color.green, 85), extend=extend.right)
+    
+    // Resistance zone 1
+    if not na(resistance1)
+        leftEdge3 = math.max(nz(resistance1Bar), bar_index - 500)
+        resistanceBox1 := box.new(leftEdge3, resistance1 + zoneThickness / 2, bar_index, resistance1 - zoneThickness / 2, border_color=color.new(color.red, 85), bgcolor=color.new(color.red, 85), extend=extend.right)
+    
+    // Resistance zone 2
+    if not na(resistance2)
+        leftEdge4 = math.max(nz(resistance2Bar), bar_index - 500)
+        resistanceBox2 := box.new(leftEdge4, resistance2 + zoneThickness / 2, bar_index, resistance2 - zoneThickness / 2, border_color=color.new(color.red, 85), bgcolor=color.new(color.red, 85), extend=extend.right)
+
+// --- Section 4: Weekly Target Zones ---
+weeklyTargetHigh = ta.valuewhen(not na(weeklyPH), weeklyPH, 0)
+weeklyTargetLow  = ta.valuewhen(not na(weeklyPL), weeklyPL, 0)
+
+var box weeklyHighBox = na
+var box weeklyLowBox  = na
+
+if showWeeklyTargetZones and barstate.islast
+    if not na(weeklyHighBox)
+        box.delete(weeklyHighBox)
+    if not na(weeklyLowBox)
+        box.delete(weeklyLowBox)
+    
+    if not na(weeklyTargetHigh)
+        weeklyHighBox := box.new(bar_index - 50, weeklyTargetHigh + zoneThickness, bar_index, weeklyTargetHigh - zoneThickness, border_color=color.new(color.purple, 90), bgcolor=color.new(color.purple, 90), extend=extend.right)
+    if not na(weeklyTargetLow)
+        weeklyLowBox := box.new(bar_index - 50, weeklyTargetLow + zoneThickness, bar_index, weeklyTargetLow - zoneThickness, border_color=color.new(color.purple, 90), bgcolor=color.new(color.purple, 90), extend=extend.right)
+
+// --- Section 5: Daily Reaction Zones ---
+dailyTargetHigh = ta.valuewhen(not na(dailyPH), dailyPH, 0)
+dailyTargetLow  = ta.valuewhen(not na(dailyPL), dailyPL, 0)
+
+var box dailyHighBox = na
+var box dailyLowBox  = na
+
+if showDailyReactionZones and barstate.islast
+    if not na(dailyHighBox)
+        box.delete(dailyHighBox)
+    if not na(dailyLowBox)
+        box.delete(dailyLowBox)
+    
+    if not na(dailyTargetHigh)
+        dailyHighBox := box.new(bar_index - 50, dailyTargetHigh + zoneThickness * 0.5, bar_index, dailyTargetHigh - zoneThickness * 0.5, border_color=color.new(color.orange, 90), bgcolor=color.new(color.orange, 90), extend=extend.right)
+    if not na(dailyTargetLow)
+        dailyLowBox := box.new(bar_index - 50, dailyTargetLow + zoneThickness * 0.5, bar_index, dailyTargetLow - zoneThickness * 0.5, border_color=color.new(color.orange, 90), bgcolor=color.new(color.orange, 90), extend=extend.right)
+
+// --- Section 6: Liquidity Sweep Detection ---
+bullishSweep = not na(nearestSupport) and low < nearestSupport and close > nearestSupport and barstate.isconfirmed
+bearishSweep = not na(nearestResistance) and high > nearestResistance and close < nearestResistance and barstate.isconfirmed
+
+// Volume filter for sweeps
+volumeOK = not useVolumeFilter or (volume > volumeMult * volSma)
+bullishSweepConfirmed = bullishSweep and volumeOK
+bearishSweepConfirmed = bearishSweep and volumeOK
+
+// --- Section 7: BOS Confirmation ---
+bullishBOS = not na(resistance1) and close > resistance1 and barstate.isconfirmed
+bearishBOS = not na(support1) and close < support1 and barstate.isconfirmed
+
+// --- Section 8: Kill Zone Check ---
+inLondonKZ = not na(time(timeframe.period, londonSession, killZoneTZ))
+inNYKZ     = not na(time(timeframe.period, nySession, killZoneTZ))
+inKillZone = inLondonKZ or inNYKZ
+killZoneOK = not useKillZones or inKillZone
+
+// --- Section 8b: Setup Quality Score ---
+// Proximity check: price within 1 ATR of zone
+nearSupportZone    = not na(nearestSupport) and math.abs(close - nearestSupport) <= nz(atrValue)
+nearResistanceZone = not na(nearestResistance) and math.abs(close - nearestResistance) <= nz(atrValue)
+
+// Long score
+longScoreBias       = (weeklyBias == BULLISH or weeklyBias == NEUTRAL) ? 0 : (weeklyBias == BEARISH and dailyBullish) ? 20 : 0
+longScoreBiasClr    = weeklyBias != NEUTRAL ? 20 : 0
+longScoreDailyAlign = dailyBullish ? 20 : 0
+longScoreEMA        = close > emaValue ? 10 : 0
+longScoreZone       = nearSupportZone ? 20 : 0
+longScoreSweep      = bullishSweepConfirmed ? 15 : 0
+longScoreBOS        = bullishBOS ? 15 : 0
+longScoreKZ         = killZoneOK and inKillZone ? 10 : 0
+longScoreRaw        = longScoreBiasClr + longScoreDailyAlign + longScoreEMA + longScoreZone + longScoreSweep + longScoreBOS + longScoreKZ
+longScore           = math.min(longScoreRaw, 100)
+
+// Short score
+shortScoreBias      = (weeklyBias == BEARISH or weeklyBias == NEUTRAL) ? 0 : (weeklyBias == BULLISH and dailyBearish) ? 20 : 0
+shortScoreBiasClr   = weeklyBias != NEUTRAL ? 20 : 0
+shortScoreDailyAlign = dailyBearish ? 20 : 0
+shortScoreEMA       = close < emaValue ? 10 : 0
+shortScoreZone      = nearResistanceZone ? 20 : 0
+shortScoreSweep     = bearishSweepConfirmed ? 15 : 0
+shortScoreBOS       = bearishBOS ? 15 : 0
+shortScoreKZ        = killZoneOK and inKillZone ? 10 : 0
+shortScoreRaw       = shortScoreBiasClr + shortScoreDailyAlign + shortScoreEMA + shortScoreZone + shortScoreSweep + shortScoreBOS + shortScoreKZ
+shortScore          = math.min(shortScoreRaw, 100)
+
+// Grade function
+getGrade(score) =>
+    score >= 80 ? "A" : score >= 60 ? "B" : score >= 40 ? "C" : "F"
+
+// --- Section 9: Entry Logic ---
+// Trade mode checks
+longModeOK = tradeMode == "Both" or (tradeMode == "Continuation" and (weeklyBias == BULLISH or weeklyBias == NEUTRAL)) or (tradeMode == "Retracement" and weeklyBias == BEARISH and dailyBullish)
+shortModeOK = tradeMode == "Both" or (tradeMode == "Continuation" and (weeklyBias == BEARISH or weeklyBias == NEUTRAL)) or (tradeMode == "Retracement" and weeklyBias == BULLISH and dailyBearish)
+
+// Sweep and BOS gates
+longSweepOK = not useLiquiditySweep or bullishSweepConfirmed
+shortSweepOK = not useLiquiditySweep or bearishSweepConfirmed
+longBosOK = not useBosConfirmation or bullishBOS
+shortBosOK = not useBosConfirmation or bearishBOS
+
+// SL/TP calculation for longs
+longSL = supportZoneBottom - nz(atrValue) * atrMultiplier
+longRisk = close - longSL
+
+// Dynamic TP for longs
+longTPDynamic = not na(weeklyTargetHigh) and useDynamicTP and (weeklyTargetHigh - close) / longRisk >= minRR ? weeklyTargetHigh : na
+longTP = not na(longTPDynamic) ? longTPDynamic : close + longRisk * rr1
+longRR = longRisk > 0 ? (longTP - close) / longRisk : 0.0
+
+// SL/TP calculation for shorts
+shortSL = resistanceZoneTop + nz(atrValue) * atrMultiplier
+shortRisk = shortSL - close
+
+// Dynamic TP for shorts
+shortTPDynamic = not na(weeklyTargetLow) and useDynamicTP and (close - weeklyTargetLow) / shortRisk >= minRR ? weeklyTargetLow : na
+shortTP = not na(shortTPDynamic) ? shortTPDynamic : close - shortRisk * rr1
+shortRR = shortRisk > 0 ? (close - shortTP) / shortRisk : 0.0
+
+// RR filter
+longRROK = longRisk > 0 and longRR >= minRR
+shortRROK = shortRisk > 0 and shortRR >= minRR
+
+// Final entry conditions
+longEntry = barstate.isconfirmed and strategy.position_size == 0 and longModeOK and dailyBullish and close > emaValue and (nearSupportZone or bullishSweepConfirmed) and longSweepOK and longBosOK and longScore >= minSetupScore and killZoneOK and longRROK
+
+shortEntry = barstate.isconfirmed and strategy.position_size == 0 and shortModeOK and dailyBearish and close < emaValue and (nearResistanceZone or bearishSweepConfirmed) and shortSweepOK and shortBosOK and shortScore >= minSetupScore and killZoneOK and shortRROK
+
+// --- Section 10: Trade Execution ---
+var float entryPrice = na
+var float slPrice    = na
+var float tpPrice    = na
+var float tradeRR    = na
+var int   tradeScore = 0
+var bool  breakevenHit = false
+
+if longEntry
+    entryPrice := close
+    slPrice    := longSL
+    tpPrice    := longTP
+    tradeRR    := longRR
+    tradeScore := longScore
+    breakevenHit := false
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+
+if shortEntry
+    entryPrice := close
+    slPrice    := shortSL
+    tpPrice    := shortTP
+    tradeRR    := shortRR
+    tradeScore := shortScore
+    breakevenHit := false
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// Breakeven logic
+if useBreakeven and strategy.position_size > 0 and not breakevenHit
+    halfwayToTP = entryPrice + (tpPrice - entryPrice) * 0.5
+    if high >= halfwayToTP
+        breakevenHit := true
+        strategy.exit("Long Exit", "Long", stop=entryPrice, limit=tpPrice)
+
+if useBreakeven and strategy.position_size < 0 and not breakevenHit
+    halfwayToTP = entryPrice - (entryPrice - tpPrice) * 0.5
+    if low <= halfwayToTP
+        breakevenHit := true
+        strategy.exit("Short Exit", "Short", stop=entryPrice, limit=tpPrice)
+
+// Trailing stop logic
+if useTrailingStop and strategy.position_size > 0
+    trailStop = close - nz(atrValue) * trailAtrMult
+    if trailStop > nz(slPrice)
+        slPrice := trailStop
+        strategy.exit("Long Exit", "Long", stop=slPrice, limit=tpPrice)
+
+if useTrailingStop and strategy.position_size < 0
+    trailStop = close + nz(atrValue) * trailAtrMult
+    if trailStop < nz(slPrice)
+        slPrice := trailStop
+        strategy.exit("Short Exit", "Short", stop=slPrice, limit=tpPrice)
+
+// Reset on position close
+if strategy.position_size == 0 and (strategy.position_size[1] != 0)
+    entryPrice := na
+    slPrice    := na
+    tpPrice    := na
+    tradeRR    := na
+    tradeScore := 0
+    breakevenHit := false
+
+// --- Section 11: Visuals ---
+// EMA with dynamic color
+emaColor = close > emaValue ? color.green : color.red
+plot(showEMA ? emaValue : na, "EMA", color=emaColor, linewidth=2)
+
+// Active trade lines
+var line entryLine = na
+var line slLine    = na
+var line tpLine    = na
+
+if showEntryExitLines
+    // Delete old lines
+    if not na(entryLine)
+        line.delete(entryLine)
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(tpLine)
+        line.delete(tpLine)
+    
+    if strategy.position_size != 0 and not na(entryPrice)
+        entryLine := line.new(bar_index - 1, entryPrice, bar_index, entryPrice, color=color.white, style=line.style_solid, width=1)
+        slLine    := line.new(bar_index - 1, slPrice, bar_index, slPrice, color=color.red, style=line.style_dashed, width=1)
+        tpLine    := line.new(bar_index - 1, tpPrice, bar_index, tpPrice, color=color.green, style=line.style_dashed, width=1)
+    else
+        entryLine := na
+        slLine    := na
+        tpLine    := na
+
+// Entry labels (only on actual entry bar, only if showHistoricalLabels)
+if showHistoricalLabels and longEntry
+    label.new(bar_index, low, "L", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.tiny)
+
+if showHistoricalLabels and shortEntry
+    label.new(bar_index, high, "S", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.tiny)
+
+// --- Section 12: Dashboard ---
+if showDashboard and barstate.islast
+    var table dash = table.new(position.top_right, 2, 25, bgcolor=color.new(color.black, 85), border_width=1, border_color=color.new(color.gray, 70))
+    
+    // Helper colors
+    biasColor = weeklyBias == BULLISH ? color.green : weeklyBias == BEARISH ? color.red : color.gray
+    dailyColor = dailyAlignment == BULLISH ? color.green : dailyAlignment == BEARISH ? color.red : color.gray
+    expectColor = str.contains(weeklyExpectation, "Bullish") ? color.green : str.contains(weeklyExpectation, "Bearish") ? color.red : color.gray
+    
+    weeklyStructure = isWeeklyHH and isWeeklyHL ? "HH+HL" : isWeeklyLH and isWeeklyLL ? "LH+LL" : "Mixed"
+    dailyStructure  = isDailyHH and isDailyHL ? "HH+HL" : isDailyLH and isDailyLL ? "LH+LL" : "Mixed"
+    
+    emaStatus = close > emaValue ? "Above" : "Below"
+    emaStatColor = close > emaValue ? color.green : color.red
+    
+    kzStatus = not useKillZones ? "Disabled" : inLondonKZ ? "London" : inNYKZ ? "NY" : "Off"
+    kzColor  = not useKillZones ? color.gray : inKillZone ? color.green : color.orange
+    
+    posStatus = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posColor  = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    
+    // Active score/grade
+    activeScore = strategy.position_size != 0 ? tradeScore : math.max(longScore, shortScore)
+    activeGrade = getGrade(activeScore)
+    gradeColor  = activeGrade == "A" ? color.green : activeGrade == "B" ? color.lime : activeGrade == "C" ? color.orange : color.red
+    
+    // Row population
+    table.cell(dash, 0, 0, "Symbol", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, syminfo.ticker, text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 1, "Timeframe", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, timeframe.period, text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 2, "Weekly Bias", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, weeklyBias, text_color=biasColor, text_size=size.small)
+    
+    table.cell(dash, 0, 3, "Weekly Expectation", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, weeklyExpectation, text_color=expectColor, text_size=size.small)
+    
+    table.cell(dash, 0, 4, "1W Structure", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, weeklyStructure, text_color=biasColor, text_size=size.small)
+    
+    table.cell(dash, 0, 5, "1D Structure", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, dailyStructure, text_color=dailyColor, text_size=size.small)
+    
+    table.cell(dash, 0, 6, "Daily Alignment", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, dailyAlignment, text_color=dailyColor, text_size=size.small)
+    
+    table.cell(dash, 0, 7, "EMA", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 7, emaStatus, text_color=emaStatColor, text_size=size.small)
+    
+    table.cell(dash, 0, 8, "Kill Zone", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 8, kzStatus, text_color=kzColor, text_size=size.small)
+    
+    table.cell(dash, 0, 9, "Support Zone", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 9, not na(nearestSupport) ? str.tostring(nearestSupport, format.mintick) : "---", text_color=color.green, text_size=size.small)
+    
+    table.cell(dash, 0, 10, "Resistance Zone", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 10, not na(nearestResistance) ? str.tostring(nearestResistance, format.mintick) : "---", text_color=color.red, text_size=size.small)
+    
+    table.cell(dash, 0, 11, "Weekly Target", text_color=color.white, text_size=size.small)
+    weeklyTargetStr = strategy.position_size > 0 ? str.tostring(nz(weeklyTargetHigh), format.mintick) : strategy.position_size < 0 ? str.tostring(nz(weeklyTargetLow), format.mintick) : "---"
+    table.cell(dash, 1, 11, weeklyTargetStr, text_color=color.purple, text_size=size.small)
+    
+    table.cell(dash, 0, 12, "Entry", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 12, not na(entryPrice) ? str.tostring(entryPrice, format.mintick) : "---", text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 13, "Stop Loss", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 13, not na(slPrice) ? str.tostring(slPrice, format.mintick) : "---", text_color=color.red, text_size=size.small)
+    
+    table.cell(dash, 0, 14, "Take Profit", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 14, not na(tpPrice) ? str.tostring(tpPrice, format.mintick) : "---", text_color=color.green, text_size=size.small)
+    
+    table.cell(dash, 0, 15, "RR", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 15, not na(tradeRR) ? str.tostring(tradeRR, "#.##") : "---", text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 16, "Setup Score", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 16, str.tostring(activeScore) + "/100", text_color=gradeColor, text_size=size.small)
+    
+    table.cell(dash, 0, 17, "Setup Grade", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 17, activeGrade, text_color=gradeColor, text_size=size.small)
+    
+    table.cell(dash, 0, 18, "Status", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 18, posStatus, text_color=posColor, text_size=size.small)
+    
+    // Performance section
+    table.cell(dash, 0, 19, "--- Performance ---", text_color=color.yellow, text_size=size.small)
+    table.cell(dash, 1, 19, "", text_color=color.yellow, text_size=size.small)
+    
+    totalTrades = strategy.closedtrades
+    wins = strategy.wintrades
+    losses = strategy.losstrades
+    winRate = totalTrades > 0 ? wins / totalTrades * 100 : 0.0
+    profitFactor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0.0
+    
+    table.cell(dash, 0, 20, "Total Trades", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 20, str.tostring(totalTrades), text_color=color.white, text_size=size.small)
+    
+    table.cell(dash, 0, 21, "Win Rate", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 21, str.tostring(winRate, "#.#") + "%", text_color=winRate >= 50 ? color.green : color.red, text_size=size.small)
+    
+    table.cell(dash, 0, 22, "Profit Factor", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 22, str.tostring(profitFactor, "#.##"), text_color=profitFactor >= 1.0 ? color.green : color.red, text_size=size.small)
+    
+    table.cell(dash, 0, 23, "Max Drawdown", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 23, str.tostring(strategy.max_drawdown, "#.##"), text_color=color.orange, text_size=size.small)
+    
+    table.cell(dash, 0, 24, "Net Profit", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 24, str.tostring(strategy.netprofit, "#.##"), text_color=strategy.netprofit >= 0 ? color.green : color.red, text_size=size.small)
+
+// --- Section 13: Alerts ---
+alertcondition(longEntry, "Long Entry", "Swing Strategy: LONG on {{ticker}} at {{close}}")
+alertcondition(shortEntry, "Short Entry", "Swing Strategy: SHORT on {{ticker}} at {{close}}")
+
+// ============================================================================
+// HOW THIS STRATEGY WORKS
+// ============================================================================
+//
+// ENTRIES:
+//   - Long entries require: daily bullish alignment, price above EMA, proximity
+//     to a support zone or a confirmed liquidity sweep below support, optional
+//     BOS confirmation, kill zone timing, and a minimum setup quality score.
+//   - Short entries are the mirror: daily bearish, price below EMA, near
+//     resistance or bearish sweep above resistance, with the same filters.
+//   - Entries use strategy.entry() for real backtesting. Only one position
+//     at a time (pyramiding=0). R:R must meet the minimum threshold.
+//
+// EXITS:
+//   - Stop loss is placed below the nearest support zone bottom (for longs)
+//     minus an ATR buffer, or above the nearest resistance zone top (shorts)
+//     plus ATR buffer.
+//   - Take profit defaults to entry +/- risk * rr1 (e.g., 2R). If dynamic TP
+//     is enabled and the weekly target zone offers >= minRR, it is used instead.
+//   - Breakeven: after price reaches 50% of the distance to TP, stop is moved
+//     to the entry price.
+//   - Trailing stop (optional): ATR-based trail that ratchets in profit direction.
+//
+// WEEKLY BIAS:
+//   - Determined from weekly pivot highs and lows. If last weekly pivot high
+//     is higher than previous (HH) AND last weekly pivot low is higher (HL),
+//     bias is bullish. LH+LL = bearish. Mixed = fallback to weekly close vs
+//     weekly EMA(21). This creates 5 expectation states: Bullish Continuation,
+//     Bearish Continuation, Bullish Retracement, Bearish Retracement, Neutral.
+//
+// DAILY ALIGNMENT:
+//   - Daily close vs daily EMA(21) combined with daily pivot structure (HH/HL
+//     for bullish, LH/LL for bearish). Both conditions needed for confirmation.
+//     This ensures the intermediate trend agrees with the trade direction.
+//
+// ZONES:
+//   - Support and resistance zones are created from chart-timeframe pivot
+//     highs and lows (configurable left/right bars). Zones have ATR-based
+//     thickness (ATR * 0.3) and are drawn as semi-transparent boxes extending
+//     to the right. Only the last 2-3 zones per side are shown to keep the
+//     chart clean. Left edges are clamped to 500 bars back.
+//
+// SETUP QUALITY SCORE:
+//   - Each potential trade is scored 0-100 based on: weekly bias clarity (20),
+//     daily alignment (20), EMA agreement (10), zone interaction (20),
+//     liquidity sweep (15), BOS confirmation (15), kill zone active (10).
+//     Trades must meet minSetupScore (default 60 = grade B) to execute.
+//
+// LIMITATIONS:
+//   - No partial position sizing (TradingView strategy limitation with BE logic).
+//   - Breakeven uses strategy.exit() re-calls which may have slight slippage.
+//   - Weekly/daily pivots require sufficient history to form (htfPivotLength bars).
+//   - Zone detection depends on pivot formation; fast-moving markets may miss zones.
+//   - Kill zone sessions are fixed strings; daylight saving changes not handled.
+//   - Commission and slippage are estimates; real execution may differ.
+//
+// SUGGESTIONS FOR IMPROVEMENT:
+//   - Add multi-timeframe confluence scoring (4H structure layer).
+//   - Implement partial TP (TP1 at 1.5R, TP2 at 3R) with position splitting.
+//   - Add time-based exit for trades that stall (e.g., close after N bars).
+//   - Integrate order flow or delta volume for sweep quality.
+//   - Add session-based performance tracking (London vs NY win rates).
+//   - Consider adaptive ATR multiplier based on volatility regime.
+//   - Add correlation filter (DXY for forex, SPX for equities).
+//
+// ============================================================================
