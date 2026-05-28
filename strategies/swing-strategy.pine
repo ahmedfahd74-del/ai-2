@@ -1,7 +1,7 @@
 // ============================================================================
 // SWING STRATEGY PRO
 // ============================================================================
-// A backtestable Pine Script v5 strategy focused on:
+// A backtestable Pine Script v6 strategy focused on:
 //   - Weekly bias detection via pivot structure
 //   - Daily alignment confirmation
 //   - Zone-based support/resistance (thick boxes, not thin lines)
@@ -16,7 +16,7 @@
 // Version: 1.0
 // ============================================================================
 
-//@version=5
+//@version=6
 strategy("Swing Strategy Pro", overlay=true, pyramiding=0, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.04, slippage=2, process_orders_on_close=true, max_boxes_count=100, max_lines_count=100, max_labels_count=50)
 
 // --- Inputs: Core Settings ---
