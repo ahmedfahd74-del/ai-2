@@ -1,28 +1,24 @@
 // ============================================================================
-// MOST VISITED LEVELS - Automatic S/R from Price Frequency
-// ============================================================================
-// Version: 2.0 - MTF support + meaningful touch filtering
+// MOST VISITED LEVELS v3 - Consistent S/R Across All Timeframes
 // ============================================================================
 
 //@version=6
-indicator("Most Visited Levels v2", overlay = true, max_lines_count = 20, max_labels_count = 20)
+indicator("Most Visited Levels v3", overlay = true, max_lines_count = 20, max_labels_count = 20)
 
 // --- Inputs ---
 
-lookback    = input.int(500, "Lookback Bars", minval = 50, maxval = 5000, group = "Analysis")
-numBins     = input.int(100, "Price Resolution (bins)", minval = 20, maxval = 500, group = "Analysis")
+lookback    = input.int(200, "Lookback Bars (of analysis TF)", minval = 20, maxval = 2000, group = "Analysis", tooltip = "How many bars of the ANALYSIS timeframe to scan. If MTF=Daily and lookback=200, it scans 200 daily bars regardless of chart TF.")
 numLevels   = input.int(5, "Number of Levels", minval = 1, maxval = 10, group = "Analysis")
-minDistance  = input.float(1.0, "Min Distance Between Levels (ATR mult)", minval = 0.1, group = "Analysis")
-touchPower  = input.int(5, "Touch Power (min bounces at level)", minval = 1, maxval = 30, group = "Analysis", tooltip = "Minimum number of times price must BOUNCE off a level (not just pass through). Higher = stronger levels only.")
-useMTF      = input.bool(false, "Use Fixed Timeframe (MTF)", group = "MTF", tooltip = "When enabled, levels are calculated from a fixed timeframe regardless of chart TF")
-mtfTF       = input.timeframe("D", "Analysis Timeframe", group = "MTF", tooltip = "Timeframe to calculate levels from. Levels stay consistent across chart TFs.")
+minDistance  = input.float(1.0, "Min Distance Between Levels (ATR mult)", minval = 0.1, step = 0.1, group = "Analysis")
+touchPower  = input.int(3, "Touch Power (min bounces)", minval = 1, maxval = 30, group = "Analysis", tooltip = "Minimum bounces at a level to be shown. Higher = only strongest levels.")
+analysisTF  = input.timeframe("D", "Analysis Timeframe", group = "Analysis", tooltip = "Levels are ALWAYS calculated from this timeframe. They stay the same on every chart TF.")
 
 lineColor   = input.color(color.new(color.yellow, 0), "Line Color", group = "Visuals")
 lineWidth   = input.int(2, "Line Width", minval = 1, maxval = 5, group = "Visuals")
 lineStyle   = input.string("solid", "Line Style", options = ["solid", "dashed", "dotted"], group = "Visuals")
 showLabels  = input.bool(true, "Show Price Labels", group = "Visuals")
 
-// --- State Variables ---
+// --- State ---
 
 var array<line>  drawnLines  = array.new_line()
 var array<label> drawnLabels = array.new_label()
@@ -35,21 +31,44 @@ getLineStyle(string style) =>
         "dotted" => line.style_dotted
         => line.style_solid
 
-// --- Pre-calculate ta functions at top level (Pine v6 requirement) ---
+// --- Fetch ALL data from the analysis timeframe ---
+// These values come from the ANALYSIS TF, not the chart TF
 
-float _rangeHigh = ta.highest(high, lookback)
-float _rangeLow  = ta.lowest(low, lookback)
-float _atrValue  = ta.atr(14)
+float tfHigh  = request.security(syminfo.tickerid, analysisTF, high, lookahead = barmerge.lookahead_off)
+float tfLow   = request.security(syminfo.tickerid, analysisTF, low, lookahead = barmerge.lookahead_off)
+float tfClose  = request.security(syminfo.tickerid, analysisTF, close, lookahead = barmerge.lookahead_off)
+float tfOpen   = request.security(syminfo.tickerid, analysisTF, open, lookahead = barmerge.lookahead_off)
+float tfAtr    = request.security(syminfo.tickerid, analysisTF, ta.atr(14), lookahead = barmerge.lookahead_off)
+float tfRangeH = request.security(syminfo.tickerid, analysisTF, ta.highest(high, lookback), lookahead = barmerge.lookahead_off)
+float tfRangeL = request.security(syminfo.tickerid, analysisTF, ta.lowest(low, lookback), lookahead = barmerge.lookahead_off)
 
-// --- MTF data fetch (when MTF mode enabled) ---
-// Fetch high/low/close arrays from the selected timeframe
+// --- Detect when analysis TF bar changes (to count only once per TF bar) ---
 
-[mtfHigh, mtfLow, mtfClose, mtfRangeH, mtfRangeL, mtfAtr] = request.security(syminfo.tickerid, mtfTF, [high, low, close, ta.highest(high, lookback), ta.lowest(low, lookback), ta.atr(14)], lookahead = barmerge.lookahead_off)
+bool tfBarChange = ta.change(time(analysisTF)) != 0
+
+// --- Track analysis TF bars in arrays for bounce counting ---
+
+var array<float> histH = array.new_float()
+var array<float> histL = array.new_float()
+var array<float> histC = array.new_float()
+var array<float> histO = array.new_float()
+
+if tfBarChange
+    array.push(histH, tfHigh)
+    array.push(histL, tfLow)
+    array.push(histC, tfClose)
+    array.push(histO, tfOpen)
+    // Cap at lookback size
+    if array.size(histH) > lookback
+        array.shift(histH)
+        array.shift(histL)
+        array.shift(histC)
+        array.shift(histO)
 
 // --- Main Logic ---
 
 if barstate.islast
-    // Clean up
+    // Cleanup
     if array.size(drawnLines) > 0
         for i = 0 to array.size(drawnLines) - 1
             line.delete(array.get(drawnLines, i))
@@ -60,91 +79,82 @@ if barstate.islast
             label.delete(array.get(drawnLabels, i))
         array.clear(drawnLabels)
 
-    // Select data source based on MTF setting
-    float rangeHigh = useMTF ? mtfRangeH : _rangeHigh
-    float rangeLow  = useMTF ? mtfRangeL : _rangeLow
-    float atrVal    = useMTF ? mtfAtr : _atrValue
-    int barsAvailable = math.min(lookback - 1, bar_index)
-    float binSize   = (rangeHigh - rangeLow) / numBins
+    int histSize = array.size(histH)
 
-    if binSize > 0 and not na(rangeHigh) and not na(rangeLow)
-        // --- Count BOUNCES per bin (not just pass-throughs) ---
-        // A bounce = bar's low touches the bin AND close is above (support bounce)
-        //         OR bar's high touches the bin AND close is below (resistance bounce)
-        // This filters out bins where price just blows through without reacting.
-        array<int> bounceCounts = array.new_int(numBins, 0)
+    if histSize >= 10 and not na(tfRangeH) and not na(tfRangeL)
+        float rangeHigh = tfRangeH
+        float rangeLow  = tfRangeL
+        float atrVal    = nz(tfAtr, (rangeHigh - rangeLow) / 50)
 
-        for i = 0 to barsAvailable
-            float barH = high[i]
-            float barL = low[i]
-            float barC = close[i]
-            float barO = open[i]
+        // Auto-calculate bin size from ATR (each bin = ATR * 0.15)
+        float binSizeRaw = atrVal * 0.15
+        float totalRange = rangeHigh - rangeLow
+        int numBins = totalRange > 0 ? math.max(10, math.min(200, int(totalRange / binSizeRaw))) : 50
+        float binSize = totalRange / numBins
 
-            // Find which bins the bar's low wick touches (potential support bounce)
-            int lowBin = math.max(0, math.min(numBins - 1, int((barL - rangeLow) / binSize)))
-            // Support bounce: low touches the bin but close is above it (price bounced up)
-            float binTop = rangeLow + (lowBin + 1) * binSize
-            if barC > binTop and barL <= binTop
-                array.set(bounceCounts, lowBin, array.get(bounceCounts, lowBin) + 1)
+        if binSize > 0
+            // Count bounces from analysis TF history
+            array<int> bounceCounts = array.new_int(numBins, 0)
 
-            // Find which bins the bar's high wick touches (potential resistance bounce)
-            int highBin = math.max(0, math.min(numBins - 1, int((barH - rangeLow) / binSize)))
-            // Resistance bounce: high touches the bin but close is below it (price bounced down)
-            float binBot = rangeLow + highBin * binSize
-            if barC < binBot and barH >= binBot
-                array.set(bounceCounts, highBin, array.get(bounceCounts, highBin) + 1)
+            for i = 0 to histSize - 1
+                float barH = array.get(histH, i)
+                float barL = array.get(histL, i)
+                float barC = array.get(histC, i)
+                float barO = array.get(histO, i)
 
-            // Also count bars that open AND close on opposite sides of a bin (reversal through)
-            int openBin = math.max(0, math.min(numBins - 1, int((barO - rangeLow) / binSize)))
-            int closeBin = math.max(0, math.min(numBins - 1, int((barC - rangeLow) / binSize)))
-            if openBin != closeBin
-                // The boundary between them got a reaction
-                int reactBin = math.min(openBin, closeBin)
-                if reactBin >= 0 and reactBin < numBins
-                    array.set(bounceCounts, reactBin, array.get(bounceCounts, reactBin) + 1)
+                // Support bounce: low touches bin, close above
+                int lowBin = math.max(0, math.min(numBins - 1, int((barL - rangeLow) / binSize)))
+                float lowBinTop = rangeLow + (lowBin + 1) * binSize
+                if barC > lowBinTop and barL <= lowBinTop
+                    array.set(bounceCounts, lowBin, array.get(bounceCounts, lowBin) + 1)
 
-        // Find top N levels
-        float minDistPrice  = nz(atrVal, binSize) * minDistance
-        array<float> levels = array.new_float()
-        array<int>   counts = array.new_int()
-        string       lStyle = getLineStyle(lineStyle)
+                // Resistance bounce: high touches bin, close below
+                int highBin = math.max(0, math.min(numBins - 1, int((barH - rangeLow) / binSize)))
+                float highBinBot = rangeLow + highBin * binSize
+                if barC < highBinBot and barH >= highBinBot
+                    array.set(bounceCounts, highBin, array.get(bounceCounts, highBin) + 1)
 
-        for lvl = 0 to numLevels - 1
-            int maxCount = 0
-            int maxBin   = -1
-            for b = 0 to numBins - 1
-                int cnt = array.get(bounceCounts, b)
-                if cnt > maxCount
-                    maxCount := cnt
-                    maxBin   := b
+            // Find top N levels
+            float minDistPrice = atrVal * minDistance
+            array<float> levels = array.new_float()
+            array<int>   counts = array.new_int()
+            string lStyle = getLineStyle(lineStyle)
 
-            if maxBin == -1 or maxCount == 0
-                break
+            for lvl = 0 to numLevels - 1
+                int maxCount = 0
+                int maxBin   = -1
+                for b = 0 to numBins - 1
+                    int cnt = array.get(bounceCounts, b)
+                    if cnt > maxCount
+                        maxCount := cnt
+                        maxBin   := b
 
-            // Touch power filter: skip if not enough bounces
-            if maxCount < touchPower
-                break
+                if maxBin == -1 or maxCount == 0
+                    break
 
-            float levelPrice = rangeLow + (maxBin + 0.5) * binSize
-            array.push(levels, levelPrice)
-            array.push(counts, maxCount)
+                if maxCount < touchPower
+                    break
 
-            // Zero out nearby bins
-            int binsToZero = math.max(1, int(minDistPrice / binSize))
-            int zeroStart  = math.max(0, maxBin - binsToZero)
-            int zeroEnd    = math.min(numBins - 1, maxBin + binsToZero)
-            for b = zeroStart to zeroEnd
-                array.set(bounceCounts, b, 0)
+                float levelPrice = rangeLow + (maxBin + 0.5) * binSize
+                array.push(levels, levelPrice)
+                array.push(counts, maxCount)
 
-        // Draw lines
-        if array.size(levels) > 0
-            for i = 0 to array.size(levels) - 1
-                float lvlPrice = array.get(levels, i)
-                int   lvlCount = array.get(counts, i)
+                // Zero nearby bins
+                int binsToZero = math.max(1, int(minDistPrice / binSize))
+                int zeroStart  = math.max(0, maxBin - binsToZero)
+                int zeroEnd    = math.min(numBins - 1, maxBin + binsToZero)
+                for b = zeroStart to zeroEnd
+                    array.set(bounceCounts, b, 0)
 
-                line newLine = line.new(bar_index - barsAvailable, lvlPrice, bar_index, lvlPrice, extend = extend.both, color = lineColor, width = lineWidth, style = lStyle)
-                array.push(drawnLines, newLine)
+            // Draw
+            if array.size(levels) > 0
+                for i = 0 to array.size(levels) - 1
+                    float lvlPrice = array.get(levels, i)
+                    int   lvlCount = array.get(counts, i)
 
-                if showLabels
-                    label newLabel = label.new(bar_index + 5, lvlPrice, str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlCount) + "x)", style = label.style_label_left, color = color.new(color.black, 60), textcolor = lineColor, size = size.small)
-                    array.push(drawnLabels, newLabel)
+                    line newLine = line.new(bar_index - 100, lvlPrice, bar_index, lvlPrice, extend = extend.both, color = lineColor, width = lineWidth, style = lStyle)
+                    array.push(drawnLines, newLine)
+
+                    if showLabels
+                        label newLabel = label.new(bar_index + 5, lvlPrice, str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlCount) + "x)", style = label.style_label_left, color = color.new(color.black, 60), textcolor = lineColor, size = size.small)
+                        array.push(drawnLabels, newLabel)
