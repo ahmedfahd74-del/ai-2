@@ -34,13 +34,14 @@ getLineStyle(string style) =>
 // --- Fetch ALL data from the analysis timeframe ---
 // These values come from the ANALYSIS TF, not the chart TF
 
-float tfHigh  = request.security(syminfo.tickerid, analysisTF, high, lookahead = barmerge.lookahead_off)
-float tfLow   = request.security(syminfo.tickerid, analysisTF, low, lookahead = barmerge.lookahead_off)
-float tfClose  = request.security(syminfo.tickerid, analysisTF, close, lookahead = barmerge.lookahead_off)
-float tfOpen   = request.security(syminfo.tickerid, analysisTF, open, lookahead = barmerge.lookahead_off)
-float tfAtr    = request.security(syminfo.tickerid, analysisTF, ta.atr(14), lookahead = barmerge.lookahead_off)
-float tfRangeH = request.security(syminfo.tickerid, analysisTF, ta.highest(high, lookback), lookahead = barmerge.lookahead_off)
-float tfRangeL = request.security(syminfo.tickerid, analysisTF, ta.lowest(low, lookback), lookahead = barmerge.lookahead_off)
+// Use [1] to always get the LAST CONFIRMED bar of the analysis TF (not the forming one)
+float tfHigh  = request.security(syminfo.tickerid, analysisTF, high[1], lookahead = barmerge.lookahead_on)
+float tfLow   = request.security(syminfo.tickerid, analysisTF, low[1], lookahead = barmerge.lookahead_on)
+float tfClose  = request.security(syminfo.tickerid, analysisTF, close[1], lookahead = barmerge.lookahead_on)
+float tfOpen   = request.security(syminfo.tickerid, analysisTF, open[1], lookahead = barmerge.lookahead_on)
+float tfAtr    = request.security(syminfo.tickerid, analysisTF, ta.atr(14)[1], lookahead = barmerge.lookahead_on)
+float tfRangeH = request.security(syminfo.tickerid, analysisTF, ta.highest(high, lookback)[1], lookahead = barmerge.lookahead_on)
+float tfRangeL = request.security(syminfo.tickerid, analysisTF, ta.lowest(low, lookback)[1], lookahead = barmerge.lookahead_on)
 
 // --- Detect when analysis TF bar changes (to count only once per TF bar) ---
 
