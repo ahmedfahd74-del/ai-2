@@ -1,13 +1,14 @@
 // ============================================================================
-// MOST VISITED LEVELS v4 - Cluster-Based S/R Detection
+// MOST VISITED LEVELS v5 - Cluster-Based S/R with Smart Coloring
 // ============================================================================
 // Collects pivot highs and lows from the analysis timeframe, clusters nearby
 // pivots using ATR-based tolerance, ranks by recency-weighted count, and draws
-// the top N clusters as horizontal lines.
+// the top N clusters as horizontal lines. Levels are colored by Support/
+// Resistance (relative to price) and scaled by strength (touch count).
 // ============================================================================
 
 //@version=6
-indicator("Most Visited Levels v4", overlay = true, max_lines_count = 20, max_labels_count = 20)
+indicator("Most Visited Levels v5", overlay = true, max_lines_count = 20, max_labels_count = 20)
 
 // --- Inputs ---
 
@@ -19,8 +20,14 @@ clusterATR  = input.float(0.5, "Cluster Width (ATR x)", minval = 0.1, maxval = 3
 minDistance  = input.float(1.5, "Min Distance Between Levels (ATR x)", minval = 0.1, step = 0.1, group = "Analysis")
 analysisTF  = input.timeframe("D", "Analysis Timeframe", group = "Analysis")
 
-lineColor   = input.color(color.new(color.yellow, 0), "Line Color", group = "Visuals")
-lineWidth   = input.int(2, "Line Width", minval = 1, maxval = 5, group = "Visuals")
+// Color settings
+useAutoColor    = input.bool(true, "Auto Color by S/R", group = "Visuals", tooltip = "Green below price (support), red above price (resistance). If off, uses single color.")
+supportColor    = input.color(color.new(color.green, 0), "Support Color (below price)", group = "Visuals")
+resistanceColor = input.color(color.new(color.red, 0), "Resistance Color (above price)", group = "Visuals")
+singleColor     = input.color(color.new(color.yellow, 0), "Single Color (if auto off)", group = "Visuals")
+useStrengthVisual = input.bool(true, "Scale Line by Strength", group = "Visuals", tooltip = "Stronger levels appear thicker and brighter")
+
+lineWidth   = input.int(3, "Max Line Width", minval = 1, maxval = 5, group = "Visuals")
 lineStyle   = input.string("solid", "Line Style", options = ["solid", "dashed", "dotted"], group = "Visuals")
 showLabels  = input.bool(true, "Show Price Labels", group = "Visuals")
 showStats   = input.bool(true, "Show Hit Rate Panel", group = "Visuals", tooltip = "Show hit rate tracking panel")
@@ -216,10 +223,16 @@ if barstate.islast
         if array.size(levels) > 0
             string lStyle = getLineStyle(lineStyle)
 
+            // Find max touch count for strength scaling
+            int maxCount = 1
+            for i = 0 to array.size(rawCounts) - 1
+                int rc = array.get(rawCounts, i)
+                if rc > maxCount
+                    maxCount := rc
+
             // Store levels for hit rate tracking
             for i = 0 to array.size(levels) - 1
                 float lvlPrice = array.get(levels, i)
-                int   lvlRaw   = array.get(rawCounts, i)
 
                 // Add to historical tracking
                 array.push(historicalLevels, lvlPrice)
@@ -238,11 +251,27 @@ if barstate.islast
                 float lvlPrice = array.get(levels, i)
                 int   lvlRaw   = array.get(rawCounts, i)
 
-                line newLine = line.new(bar_index - 100, lvlPrice, bar_index, lvlPrice, extend = extend.both, color = lineColor, width = lineWidth, style = lStyle)
+                // Determine base color: support (below price) vs resistance (above price)
+                color baseColor = singleColor
+                if useAutoColor
+                    baseColor := lvlPrice < close ? supportColor : resistanceColor
+
+                // Strength scaling: ratio of this level's touches to the strongest
+                float strengthRatio = maxCount > 0 ? float(lvlRaw) / float(maxCount) : 1.0
+
+                // Apply strength-based width and transparency
+                int    finalWidth = lineWidth
+                color  finalColor = baseColor
+                if useStrengthVisual
+                    finalWidth := math.max(1, int(math.round(lineWidth * strengthRatio)))
+                    int transp = int(50 * (1 - strengthRatio))
+                    finalColor := color.new(baseColor, transp)
+
+                line newLine = line.new(bar_index - 100, lvlPrice, bar_index, lvlPrice, extend = extend.both, color = finalColor, width = finalWidth, style = lStyle)
                 array.push(drawnLines, newLine)
 
                 if showLabels
-                    label newLabel = label.new(bar_index + labelOffset, lvlPrice, str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlRaw) + " touches)", style = label.style_none, textcolor = lineColor, size = getLabelSize(labelSize))
+                    label newLabel = label.new(bar_index + labelOffset, lvlPrice, str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlRaw) + " touches)", style = label.style_none, textcolor = finalColor, size = getLabelSize(labelSize))
                     array.push(drawnLabels, newLabel)
 
     // --- Stats Table ---
