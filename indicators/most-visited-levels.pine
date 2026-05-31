@@ -1,11 +1,6 @@
 // ============================================================================
 // MOST VISITED LEVELS - Automatic Support/Resistance from Price Frequency
 // ============================================================================
-// Divides the visible price range into bins, counts how many bars touch each
-// bin, and plots extended horizontal lines at the top N most-visited price
-// levels. Works on any ticker (crypto, forex, stocks, indices) and any
-// timeframe.
-//
 // Version: 1.0
 // ============================================================================
 
@@ -34,13 +29,19 @@ ATR_LENGTH = 14
 var array<line>  drawnLines  = array.new_line()
 var array<label> drawnLabels = array.new_label()
 
-// --- Helper: Convert line style string to built-in constant ---
+// --- Helper ---
 
 getLineStyle(string style) =>
     switch style
         "dashed" => line.style_dashed
         "dotted" => line.style_dotted
         => line.style_solid
+
+// --- Pre-calculate ta functions at top level (Pine v6 requirement) ---
+
+float _rangeHigh = ta.highest(high, lookback)
+float _rangeLow  = ta.lowest(low, lookback)
+float _atrValue  = ta.atr(ATR_LENGTH)
 
 // --- Main Logic (only on last bar for performance) ---
 
@@ -56,13 +57,13 @@ if barstate.islast
             label.delete(array.get(drawnLabels, i))
         array.clear(drawnLabels)
 
-    // Calculate price range over lookback
+    // Use pre-calculated values
     int barsAvailable = math.min(lookback - 1, bar_index)
-    float rangeHigh   = ta.highest(high, lookback)
-    float rangeLow    = ta.lowest(low, lookback)
+    float rangeHigh   = _rangeHigh
+    float rangeLow    = _rangeLow
     float binSize     = (rangeHigh - rangeLow) / numBins
 
-    // Guard against flat market (binSize <= 0)
+    // Guard against flat market
     if binSize > 0
         // Count touches per bin
         array<int> touchCounts = array.new_int(numBins, 0)
@@ -70,20 +71,18 @@ if barstate.islast
         for i = 0 to barsAvailable
             float barLow  = low[i]
             float barHigh = high[i]
-            int binStart  = math.max(0, int((barLow - rangeLow) / binSize))
-            int binEnd    = math.min(numBins - 1, int((barHigh - rangeLow) / binSize))
+            int binStart  = math.max(0, math.min(numBins - 1, int((barLow - rangeLow) / binSize)))
+            int binEnd    = math.max(0, math.min(numBins - 1, int((barHigh - rangeLow) / binSize)))
             for b = binStart to binEnd
                 array.set(touchCounts, b, array.get(touchCounts, b) + 1)
 
         // Find top N levels with minimum distance enforcement
-        float atrValue       = ta.atr(ATR_LENGTH)
-        float minDistPrice   = nz(atrValue, binSize) * minDistance
+        float minDistPrice   = nz(_atrValue, binSize) * minDistance
         array<float> levels  = array.new_float()
         array<int>   counts  = array.new_int()
         string       lStyle  = getLineStyle(lineStyle)
 
         for lvl = 0 to numLevels - 1
-            // Find the bin with the maximum count
             int   maxCount = 0
             int   maxBin   = -1
             for b = 0 to numBins - 1
@@ -95,7 +94,6 @@ if barstate.islast
             if maxBin == -1 or maxCount == 0
                 break
 
-            // Skip if below minimum touch threshold
             if maxCount < minTouches
                 break
 
@@ -110,29 +108,15 @@ if barstate.islast
             for b = zeroStart to zeroEnd
                 array.set(touchCounts, b, 0)
 
-        // Draw lines and labels at found levels
-        for i = 0 to array.size(levels) - 1
-            float lvlPrice = array.get(levels, i)
-            int   lvlCount = array.get(counts, i)
+        // Draw lines and labels
+        if array.size(levels) > 0
+            for i = 0 to array.size(levels) - 1
+                float lvlPrice = array.get(levels, i)
+                int   lvlCount = array.get(counts, i)
 
-            line newLine = line.new(
-                 x1     = bar_index - barsAvailable,
-                 y1     = lvlPrice,
-                 x2     = bar_index,
-                 y2     = lvlPrice,
-                 extend = extend.both,
-                 color  = lineColor,
-                 width  = lineWidth,
-                 style  = lStyle)
-            array.push(drawnLines, newLine)
+                line newLine = line.new(bar_index - barsAvailable, lvlPrice, bar_index, lvlPrice, extend = extend.both, color = lineColor, width = lineWidth, style = lStyle)
+                array.push(drawnLines, newLine)
 
-            if showLabels
-                label newLabel = label.new(
-                     x      = bar_index + 5,
-                     y      = lvlPrice,
-                     text   = str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlCount) + ")",
-                     style  = label.style_label_left,
-                     color  = color.new(color.black, 60),
-                     textcolor = lineColor,
-                     size   = size.small)
-                array.push(drawnLabels, newLabel)
+                if showLabels
+                    label newLabel = label.new(bar_index + 5, lvlPrice, str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlCount) + ")", style = label.style_label_left, color = color.new(color.black, 60), textcolor = lineColor, size = size.small)
+                    array.push(drawnLabels, newLabel)
