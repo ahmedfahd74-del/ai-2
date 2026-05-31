@@ -1,18 +1,23 @@
 // ============================================================================
-// MOST VISITED LEVELS v3 - Consistent S/R Across All Timeframes
+// MOST VISITED LEVELS v4 - Cluster-Based S/R Detection
+// ============================================================================
+// Collects pivot highs and lows from the analysis timeframe, clusters nearby
+// pivots using ATR-based tolerance, ranks by recency-weighted count, and draws
+// the top N clusters as horizontal lines.
 // ============================================================================
 
 //@version=6
-indicator("Most Visited Levels v3", overlay = true, max_lines_count = 20, max_labels_count = 20)
+indicator("Most Visited Levels v4", overlay = true, max_lines_count = 20, max_labels_count = 20)
 
 // --- Inputs ---
 
-lookback    = input.int(200, "Lookback Bars (of analysis TF)", minval = 20, maxval = 2000, group = "Analysis", tooltip = "How many bars of the ANALYSIS timeframe to scan. If MTF=Daily and lookback=200, it scans 200 daily bars regardless of chart TF.")
+lookback    = input.int(200, "Lookback Bars", minval = 20, maxval = 2000, group = "Analysis")
 numLevels   = input.int(5, "Number of Levels", minval = 1, maxval = 10, group = "Analysis")
-minDistance  = input.float(1.0, "Min Distance Between Levels (ATR mult)", minval = 0.1, step = 0.1, group = "Analysis")
-touchPower  = input.int(3, "Touch Power (min bounces)", minval = 1, maxval = 30, group = "Analysis", tooltip = "Minimum real pivot touches at a level. A pivot means price actually reversed at this point.")
-pivotLen    = input.int(3, "Pivot Length (for touch detection)", minval = 1, maxval = 10, group = "Analysis", tooltip = "Bars left/right for pivot detection. Higher = stronger pivots, fewer but more reliable touches.")
-analysisTF  = input.timeframe("D", "Analysis Timeframe", group = "Analysis", tooltip = "Levels are ALWAYS calculated from this timeframe. They stay the same on every chart TF.")
+touchPower  = input.int(3, "Min Touches", minval = 1, maxval = 20, group = "Analysis", tooltip = "Min swing reversals at a level")
+pivotLen    = input.int(3, "Pivot Strength", minval = 1, maxval = 10, group = "Analysis", tooltip = "Bars left/right for swing detection")
+clusterATR  = input.float(0.5, "Cluster Width (ATR x)", minval = 0.1, maxval = 3.0, step = 0.1, group = "Analysis", tooltip = "How close pivots must be to count as same level")
+minDistance  = input.float(1.5, "Min Distance Between Levels (ATR x)", minval = 0.1, step = 0.1, group = "Analysis")
+analysisTF  = input.timeframe("D", "Analysis Timeframe", group = "Analysis")
 
 lineColor   = input.color(color.new(color.yellow, 0), "Line Color", group = "Visuals")
 lineWidth   = input.int(2, "Line Width", minval = 1, maxval = 5, group = "Visuals")
@@ -34,9 +39,8 @@ var array<bool>  levelHit         = array.new_bool()
 var array<int>   levelBar         = array.new_int()
 var int          totalLevelsDrawn = 0
 var int          totalLevelsHit   = 0
-var float        avgBounceCount   = 0.0
 
-// --- Helper ---
+// --- Helpers ---
 
 getLineStyle(string style) =>
     switch style
@@ -51,58 +55,47 @@ getLabelSize(string sz) =>
         "large"  => size.large
         => size.small
 
-// --- Fetch ALL data from the analysis timeframe ---
-// These values come from the ANALYSIS TF, not the chart TF
+// --- MTF Data Collection ---
 
-// Use [1] to always get the LAST CONFIRMED bar of the analysis TF (not the forming one)
-float tfHigh  = request.security(syminfo.tickerid, analysisTF, high[1], lookahead = barmerge.lookahead_on)
-float tfLow   = request.security(syminfo.tickerid, analysisTF, low[1], lookahead = barmerge.lookahead_on)
-float tfClose  = request.security(syminfo.tickerid, analysisTF, close[1], lookahead = barmerge.lookahead_on)
-float tfOpen   = request.security(syminfo.tickerid, analysisTF, open[1], lookahead = barmerge.lookahead_on)
+float tfHigh   = request.security(syminfo.tickerid, analysisTF, high[1], lookahead = barmerge.lookahead_on)
+float tfLow    = request.security(syminfo.tickerid, analysisTF, low[1], lookahead = barmerge.lookahead_on)
 float tfAtr    = request.security(syminfo.tickerid, analysisTF, ta.atr(14)[1], lookahead = barmerge.lookahead_on)
 float tfRangeH = request.security(syminfo.tickerid, analysisTF, ta.highest(high, lookback)[1], lookahead = barmerge.lookahead_on)
 float tfRangeL = request.security(syminfo.tickerid, analysisTF, ta.lowest(low, lookback)[1], lookahead = barmerge.lookahead_on)
 
-// --- Detect when analysis TF bar changes (to count only once per TF bar) ---
+// --- Detect analysis TF bar changes ---
 
 bool tfBarChange = ta.change(time(analysisTF)) != 0
 
-// --- Track analysis TF bars in arrays for bounce counting ---
+// --- Track analysis TF bars in arrays ---
 
 var array<float> histH = array.new_float()
 var array<float> histL = array.new_float()
-var array<float> histC = array.new_float()
-var array<float> histO = array.new_float()
 
 if tfBarChange
     array.push(histH, tfHigh)
     array.push(histL, tfLow)
-    array.push(histC, tfClose)
-    array.push(histO, tfOpen)
-    // Cap at lookback size
     if array.size(histH) > lookback
         array.shift(histH)
         array.shift(histL)
-        array.shift(histC)
-        array.shift(histO)
 
 // --- Hit Rate Tracking (runs every bar) ---
 
 if array.size(historicalLevels) > 0
     float atrCheck = nz(tfAtr, 0.0)
     if atrCheck > 0
-        float halfBin = atrCheck * 0.15 * 0.5
+        float halfTol = atrCheck * clusterATR * 0.5
         for i = 0 to array.size(historicalLevels) - 1
             if not array.get(levelHit, i)
                 float lvl = array.get(historicalLevels, i)
-                if low <= lvl + halfBin and high >= lvl - halfBin
+                if low <= lvl + halfTol and high >= lvl - halfTol
                     array.set(levelHit, i, true)
                     totalLevelsHit := totalLevelsHit + 1
 
 // --- Main Logic ---
 
 if barstate.islast
-    // Cleanup
+    // Cleanup old drawings
     if array.size(drawnLines) > 0
         for i = 0 to array.size(drawnLines) - 1
             line.delete(array.get(drawnLines, i))
@@ -115,124 +108,142 @@ if barstate.islast
 
     int histSize = array.size(histH)
 
-    if histSize >= 10 and not na(tfRangeH) and not na(tfRangeL)
-        float rangeHigh = tfRangeH
-        float rangeLow  = tfRangeL
-        float atrVal    = nz(tfAtr, (rangeHigh - rangeLow) / 50)
+    if histSize >= 10 and not na(tfAtr)
+        // Step 1: Find all pivots
+        array<float> pivotPrices  = array.new_float()
+        array<int>   pivotWeights = array.new_int()
 
-        // Auto-calculate bin size from ATR (each bin = ATR * 0.15)
-        float binSizeRaw = atrVal * 0.15
-        float totalRange = rangeHigh - rangeLow
-        int numBins = totalRange > 0 ? math.max(10, math.min(200, int(totalRange / binSizeRaw))) : 50
-        float binSize = totalRange / numBins
+        for i = pivotLen to histSize - 1 - pivotLen
+            // Recency weight
+            int weight = i >= int(histSize * 0.75) ? 3 : i >= int(histSize * 0.25) ? 2 : 1
 
-        if binSize > 0
-            // Pivot-based touch detection
-            array<int> weightedCounts = array.new_int(numBins, 0)
-            array<int> rawCounts      = array.new_int(numBins, 0)
+            // Check pivot high
+            bool isPH = true
+            float ph = array.get(histH, i)
+            for j = 1 to pivotLen
+                if array.get(histH, i - j) >= ph or array.get(histH, i + j) >= ph
+                    isPH := false
+                    break
+            if isPH
+                array.push(pivotPrices, ph)
+                array.push(pivotWeights, weight)
 
-            // Detect pivot highs and lows from histH/histL arrays
-            for i = pivotLen to histSize - 1 - pivotLen
-                // Recency weighting
-                int weight = i >= int(histSize * 0.75) ? 3 : i >= int(histSize * 0.25) ? 2 : 1
+            // Check pivot low
+            bool isPL = true
+            float pl = array.get(histL, i)
+            for j = 1 to pivotLen
+                if array.get(histL, i - j) <= pl or array.get(histL, i + j) <= pl
+                    isPL := false
+                    break
+            if isPL
+                array.push(pivotPrices, pl)
+                array.push(pivotWeights, weight)
 
-                // Check pivot high: histH[i] higher than all neighbors within pivotLen
-                bool isPivotHigh = true
-                float candidateH = array.get(histH, i)
-                for j = 1 to pivotLen
-                    if array.get(histH, i - j) >= candidateH or array.get(histH, i + j) >= candidateH
-                        isPivotHigh := false
+        // Step 2: Cluster pivots
+        float clusterTol = nz(tfAtr) * clusterATR
+        array<float> clusterAvg      = array.new_float()
+        array<int>   clusterRawCount = array.new_int()
+        array<int>   clusterWeighted = array.new_int()
+
+        if array.size(pivotPrices) > 0
+            for i = 0 to array.size(pivotPrices) - 1
+                float pp = array.get(pivotPrices, i)
+                int   pw = array.get(pivotWeights, i)
+                bool  merged = false
+
+                if array.size(clusterAvg) > 0
+                    for j = 0 to array.size(clusterAvg) - 1
+                        if math.abs(pp - array.get(clusterAvg, j)) <= clusterTol
+                            // Merge into existing cluster
+                            float oldAvg  = array.get(clusterAvg, j)
+                            int   oldCount = array.get(clusterRawCount, j)
+                            int   newCount = oldCount + 1
+                            array.set(clusterAvg, j, (oldAvg * oldCount + pp) / newCount)
+                            array.set(clusterRawCount, j, newCount)
+                            array.set(clusterWeighted, j, array.get(clusterWeighted, j) + pw)
+                            merged := true
+                            break
+
+                if not merged
+                    array.push(clusterAvg, pp)
+                    array.push(clusterRawCount, 1)
+                    array.push(clusterWeighted, pw)
+
+        // Step 3: Select top N levels using while loop with safety counter
+        array<float> levels    = array.new_float()
+        array<int>   rawCounts = array.new_int()
+
+        // Copy weighted for selection (zero out after picking)
+        array<int> selWeighted = array.copy(clusterWeighted)
+
+        int levelsFound = 0
+        int attempts    = 0
+        while levelsFound < numLevels and attempts < 100
+            attempts += 1
+
+            int maxW   = 0
+            int maxIdx = -1
+            if array.size(selWeighted) > 0
+                for k = 0 to array.size(selWeighted) - 1
+                    int w = array.get(selWeighted, k)
+                    int r = array.get(clusterRawCount, k)
+                    if w > maxW and r >= touchPower
+                        maxW   := w
+                        maxIdx := k
+
+            if maxIdx == -1
+                break
+
+            float selectedPrice = array.get(clusterAvg, maxIdx)
+
+            // Check min distance from already selected levels
+            bool tooClose = false
+            if array.size(levels) > 0
+                for k = 0 to array.size(levels) - 1
+                    if math.abs(selectedPrice - array.get(levels, k)) < nz(tfAtr) * minDistance
+                        tooClose := true
                         break
 
-                // Check pivot low: histL[i] lower than all neighbors within pivotLen
-                bool isPivotLow = true
-                float candidateL = array.get(histL, i)
-                for j = 1 to pivotLen
-                    if array.get(histL, i - j) <= candidateL or array.get(histL, i + j) <= candidateL
-                        isPivotLow := false
-                        break
+            // Zero it out regardless so we don't pick it again
+            array.set(selWeighted, maxIdx, 0)
 
-                // Support touch: pivot low falls in a bin zone
-                if isPivotLow
-                    int lowBin = math.max(0, math.min(numBins - 1, int((candidateL - rangeLow) / binSize)))
-                    array.set(weightedCounts, lowBin, array.get(weightedCounts, lowBin) + weight)
-                    array.set(rawCounts, lowBin, array.get(rawCounts, lowBin) + 1)
+            if not tooClose
+                array.push(levels, selectedPrice)
+                array.push(rawCounts, array.get(clusterRawCount, maxIdx))
+                levelsFound += 1
 
-                // Resistance touch: pivot high falls in a bin zone
-                if isPivotHigh
-                    int highBin = math.max(0, math.min(numBins - 1, int((candidateH - rangeLow) / binSize)))
-                    array.set(weightedCounts, highBin, array.get(weightedCounts, highBin) + weight)
-                    array.set(rawCounts, highBin, array.get(rawCounts, highBin) + 1)
-
-            // Find top N levels (rank by weighted score, filter by raw count >= touchPower)
-            float minDistPrice = atrVal * minDistance
-            array<float> levels     = array.new_float()
-            array<int>   counts     = array.new_int()
-            array<int>   rawDisplay = array.new_int()
+        // Step 4: Draw levels
+        if array.size(levels) > 0
             string lStyle = getLineStyle(lineStyle)
 
-            for lvl = 0 to numLevels - 1
-                int maxWeighted = 0
-                int maxBin      = -1
-                for b = 0 to numBins - 1
-                    int wCnt = array.get(weightedCounts, b)
-                    int rCnt = array.get(rawCounts, b)
-                    if wCnt > maxWeighted and rCnt >= touchPower
-                        maxWeighted := wCnt
-                        maxBin      := b
+            // Store levels for hit rate tracking
+            for i = 0 to array.size(levels) - 1
+                float lvlPrice = array.get(levels, i)
+                int   lvlRaw   = array.get(rawCounts, i)
 
-                if maxBin == -1 or maxWeighted == 0
-                    break
+                // Add to historical tracking
+                array.push(historicalLevels, lvlPrice)
+                array.push(levelHit, false)
+                array.push(levelBar, bar_index)
+                totalLevelsDrawn := totalLevelsDrawn + 1
 
-                float levelPrice = rangeLow + (maxBin + 0.5) * binSize
-                int   rawCount   = array.get(rawCounts, maxBin)
-                array.push(levels, levelPrice)
-                array.push(counts, maxWeighted)
-                array.push(rawDisplay, rawCount)
+                // Cap tracking arrays at 50 entries
+                if array.size(historicalLevels) > 50
+                    array.shift(historicalLevels)
+                    array.shift(levelHit)
+                    array.shift(levelBar)
 
-                // Zero nearby bins
-                int binsToZero = math.max(1, int(minDistPrice / binSize))
-                int zeroStart  = math.max(0, maxBin - binsToZero)
-                int zeroEnd    = math.min(numBins - 1, maxBin + binsToZero)
-                for b = zeroStart to zeroEnd
-                    array.set(weightedCounts, b, 0)
-                    array.set(rawCounts, b, 0)
+            // Draw lines and labels
+            for i = 0 to array.size(levels) - 1
+                float lvlPrice = array.get(levels, i)
+                int   lvlRaw   = array.get(rawCounts, i)
 
-            // Draw
-            if array.size(levels) > 0
-                // Store levels for hit rate tracking
-                float bounceSum = 0.0
-                for i = 0 to array.size(levels) - 1
-                    float lvlPrice = array.get(levels, i)
-                    int   lvlCount = array.get(counts, i)
-                    int   lvlRaw   = array.get(rawDisplay, i)
-                    bounceSum += lvlCount
+                line newLine = line.new(bar_index - 100, lvlPrice, bar_index, lvlPrice, extend = extend.both, color = lineColor, width = lineWidth, style = lStyle)
+                array.push(drawnLines, newLine)
 
-                    // Add to historical tracking arrays
-                    array.push(historicalLevels, lvlPrice)
-                    array.push(levelHit, false)
-                    array.push(levelBar, bar_index)
-                    totalLevelsDrawn := totalLevelsDrawn + 1
-
-                    // Cap arrays at 50 entries
-                    if array.size(historicalLevels) > 50
-                        // Check if oldest was hit before removing
-                        array.shift(historicalLevels)
-                        array.shift(levelHit)
-                        array.shift(levelBar)
-
-                avgBounceCount := bounceSum / array.size(levels)
-
-                for i = 0 to array.size(levels) - 1
-                    float lvlPrice = array.get(levels, i)
-                    int   lvlRaw   = array.get(rawDisplay, i)
-
-                    line newLine = line.new(bar_index - 100, lvlPrice, bar_index, lvlPrice, extend = extend.both, color = lineColor, width = lineWidth, style = lStyle)
-                    array.push(drawnLines, newLine)
-
-                    if showLabels
-                        label newLabel = label.new(bar_index + labelOffset, lvlPrice, str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlRaw) + " pivots)", style = label.style_none, textcolor = lineColor, size = getLabelSize(labelSize))
-                        array.push(drawnLabels, newLabel)
+                if showLabels
+                    label newLabel = label.new(bar_index + labelOffset, lvlPrice, str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlRaw) + " touches)", style = label.style_none, textcolor = lineColor, size = getLabelSize(labelSize))
+                    array.push(drawnLabels, newLabel)
 
     // --- Stats Table ---
 
@@ -248,5 +259,5 @@ if barstate.islast
         table.cell(statsTable, 1, 1, str.tostring(totalLevelsHit), text_color = color.white, text_size = size.small)
         table.cell(statsTable, 0, 2, "Hit Rate", text_color = color.white, text_size = size.small)
         table.cell(statsTable, 1, 2, str.tostring(hitRate, "#.#") + "%", text_color = hitRateColor, text_size = size.small)
-        table.cell(statsTable, 0, 3, "Avg Bounces", text_color = color.white, text_size = size.small)
-        table.cell(statsTable, 1, 3, str.tostring(avgBounceCount, "#.#"), text_color = color.white, text_size = size.small)
+        table.cell(statsTable, 0, 3, "Clusters Found", text_color = color.white, text_size = size.small)
+        table.cell(statsTable, 1, 3, str.tostring(array.size(historicalLevels)), text_color = color.white, text_size = size.small)
