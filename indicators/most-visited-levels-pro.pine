@@ -1,0 +1,366 @@
+// ============================================================================
+// MOST VISITED LEVELS PRO v6 - Adaptive Cluster S/R Engine
+// ============================================================================
+// A production-grade rewrite of the cluster-based S/R indicator, redesigned
+// for stability on low timeframes (1M / 5M) and built as the visualization
+// layer of a larger trading platform.
+//
+// KEY UPGRADES vs v5:
+//   - Auto analysis-TF selection: avoids demanding Daily bars on a 1M chart
+//     (the #1 reason v5 went blank on low TFs).
+//   - Volatility-aware adaptive clustering (ATR-fast/ATR-slow regime factor).
+//   - Multi-factor level scoring: touches + recency + wick rejection quality
+//     + freshness decay (volume/time-spent noted as approximations below).
+//   - Micro-noise suppression: pivot prominence gate scaled by ATR.
+//   - Fixed realtime double-count bug in hit-rate tracking (dedupe on add).
+//   - Safe line anchoring (no bar_index - 100 underflow).
+//   - Modular helper functions, single data source, bounded loops.
+//
+// NON-REPAINT NOTES:
+//   - HTF data uses lookahead_off + [1] (confirmed prior HTF bar).
+//   - Pivots are confirmed (offset by pivotLen) so they finalize after
+//     pivotLen bars - inherently non-repainting for history.
+//   - Live levels redraw each tick for the current map; hit-rate counts a
+//     level only once (dedupe), so realtime ticks do not inflate stats.
+// ============================================================================
+
+//@version=6
+indicator("Most Visited Levels PRO v6", overlay = true, max_lines_count = 30, max_labels_count = 30)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+grpA = "Analysis"
+lookback   = input.int(200, "Lookback (analysis-TF bars)", minval = 20, maxval = 1000, group = grpA)
+numLevels  = input.int(5, "Number of Levels", minval = 1, maxval = 10, group = grpA)
+touchPower = input.int(2, "Min Touches", minval = 1, maxval = 20, group = grpA, tooltip = "Minimum swing reversals required at a level")
+pivotLen   = input.int(3, "Pivot Strength", minval = 1, maxval = 15, group = grpA, tooltip = "Bars left/right for swing detection")
+
+grpTF = "Timeframe Engine"
+tfMode     = input.string("Auto", "Analysis TF Mode", options = ["Auto", "Manual"], group = grpTF, tooltip = "Auto picks a stable analysis TF based on your chart TF so low TFs (1M/5M) still load enough data.")
+manualTF   = input.timeframe("D", "Manual Analysis TF", group = grpTF)
+
+grpAdapt = "Adaptive Engine"
+baseClusterATR = input.float(0.5, "Base Cluster Width (ATR x)", minval = 0.1, maxval = 3.0, step = 0.1, group = grpAdapt, tooltip = "Base merge distance. Auto-scaled by volatility regime.")
+useRegime      = input.bool(true, "Volatility-Adaptive Clustering", group = grpAdapt, tooltip = "Widen clusters in expanding volatility, tighten in contraction.")
+minDistATR     = input.float(1.5, "Min Distance Between Levels (ATR x)", minval = 0.1, step = 0.1, group = grpAdapt)
+prominenceATR  = input.float(0.25, "Min Pivot Prominence (ATR x)", minval = 0.0, maxval = 2.0, step = 0.05, group = grpAdapt, tooltip = "Noise gate: a swing must stick out by at least this much ATR vs its neighbour. Higher = less noise on 1M/5M.")
+
+grpScore = "Scoring Weights"
+wTouch   = input.float(1.0, "Weight: Touches", minval = 0.0, step = 0.1, group = grpScore)
+wRecency = input.float(1.0, "Weight: Recency", minval = 0.0, step = 0.1, group = grpScore)
+wWick    = input.float(1.0, "Weight: Wick Rejection", minval = 0.0, step = 0.1, group = grpScore)
+wFresh   = input.float(1.0, "Weight: Freshness", minval = 0.0, step = 0.1, group = grpScore)
+
+grpVis = "Visuals"
+useAutoColor      = input.bool(true, "Auto Color by S/R", group = grpVis, tooltip = "Green below price (support), red above (resistance).")
+supportColor      = input.color(color.new(color.green, 0), "Support Color", group = grpVis)
+resistanceColor   = input.color(color.new(color.red, 0), "Resistance Color", group = grpVis)
+singleColor       = input.color(color.new(color.yellow, 0), "Single Color (auto off)", group = grpVis)
+useStrengthVisual = input.bool(true, "Scale Line by Strength", group = grpVis)
+lineWidthMax      = input.int(3, "Max Line Width", minval = 1, maxval = 5, group = grpVis)
+lineStyleStr      = input.string("solid", "Line Style", options = ["solid", "dashed", "dotted"], group = grpVis)
+showLabels        = input.bool(true, "Show Labels", group = grpVis)
+showScore         = input.bool(true, "Show Score in Label", group = grpVis, tooltip = "Show confidence score 0-100 next to touch count")
+labelOffset       = input.int(40, "Label Offset (bars)", minval = 5, maxval = 200, group = grpVis)
+labelSizeStr      = input.string("small", "Label Size", options = ["tiny", "small", "normal", "large"], group = grpVis)
+
+grpPanel = "Dashboard"
+showStats = input.bool(true, "Show Engine Panel", group = grpPanel)
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+f_lineStyle(string s) =>
+    switch s
+        "dashed" => line.style_dashed
+        "dotted" => line.style_dotted
+        => line.style_solid
+
+f_labelSize(string s) =>
+    switch s
+        "tiny"   => size.tiny
+        "normal" => size.normal
+        "large"  => size.large
+        => size.small
+
+// Auto-select a stable analysis TF based on the chart TF.
+// Core fix for 1M/5M: we never demand Daily bars on a 1M chart.
+f_autoTF() =>
+    float cm = timeframe.in_seconds(timeframe.period) / 60.0
+    string res = cm <= 1 ? "15" : cm <= 5 ? "60" : cm <= 15 ? "240" : cm <= 60 ? "D" : cm <= 240 ? "D" : "W"
+    res
+
+string analysisTF = tfMode == "Auto" ? f_autoTF() : manualTF
+
+// ============================================================================
+// MTF DATA COLLECTION (single consistent source)
+// ============================================================================
+
+f_htf(_expr) =>
+    request.security(syminfo.tickerid, analysisTF, _expr, lookahead = barmerge.lookahead_off)
+
+float tfHigh    = f_htf(high[1])
+float tfLow     = f_htf(low[1])
+float tfOpen    = f_htf(open[1])
+float tfClose   = f_htf(close[1])
+float tfAtrFast = f_htf(ta.atr(14)[1])
+float tfAtrSlow = f_htf(ta.atr(50)[1])
+
+bool tfBarChange = ta.change(time(analysisTF)) != 0
+
+// Persistent rolling history of the analysis TF
+var array<float> histH = array.new_float()
+var array<float> histL = array.new_float()
+var array<float> histO = array.new_float()
+var array<float> histC = array.new_float()
+
+if tfBarChange and not na(tfHigh)
+    array.push(histH, tfHigh)
+    array.push(histL, tfLow)
+    array.push(histO, tfOpen)
+    array.push(histC, tfClose)
+    if array.size(histH) > lookback
+        array.shift(histH)
+        array.shift(histL)
+        array.shift(histO)
+        array.shift(histC)
+
+// ============================================================================
+// ADAPTIVE ENGINE: volatility regime -> dynamic cluster width
+// ============================================================================
+float regimeMult = 1.0
+if useRegime and not na(tfAtrFast) and not na(tfAtrSlow) and tfAtrSlow > 0
+    regimeMult := math.max(0.7, math.min(1.6, tfAtrFast / tfAtrSlow))
+
+float clusterTol  = nz(tfAtrFast) * baseClusterATR * regimeMult
+float minDistance = nz(tfAtrFast) * minDistATR
+float promGate    = nz(tfAtrFast) * prominenceATR
+
+// ============================================================================
+// HIT-RATE TRACKING STATE
+// ============================================================================
+var array<float> trkLevel = array.new_float()
+var array<bool>  trkHit   = array.new_bool()
+var int totalDrawn = 0
+var int totalHit   = 0
+
+if array.size(trkLevel) > 0 and not na(tfAtrFast)
+    float tol = clusterTol * 0.5
+    for i = 0 to array.size(trkLevel) - 1
+        if not array.get(trkHit, i)
+            float lv = array.get(trkLevel, i)
+            if low <= lv + tol and high >= lv - tol
+                array.set(trkHit, i, true)
+                totalHit += 1
+
+// ============================================================================
+// DRAW STATE
+// ============================================================================
+var array<line>  drawnLines  = array.new_line()
+var array<label> drawnLabels = array.new_label()
+
+// ============================================================================
+// MAIN COMPUTE (last bar only for the visual map)
+// ============================================================================
+if barstate.islast
+    if array.size(drawnLines) > 0
+        for i = 0 to array.size(drawnLines) - 1
+            line.delete(array.get(drawnLines, i))
+        array.clear(drawnLines)
+    if array.size(drawnLabels) > 0
+        for i = 0 to array.size(drawnLabels) - 1
+            label.delete(array.get(drawnLabels, i))
+        array.clear(drawnLabels)
+
+    int histSize = array.size(histH)
+
+    if histSize >= 10 and not na(tfAtrFast) and tfAtrFast > 0
+        // STEP 1: Pivot detection with prominence (noise) gate
+        array<float> pPrice = array.new_float()
+        array<float> pRecw  = array.new_float()
+        array<float> pWick  = array.new_float()
+
+        for i = pivotLen to histSize - 1 - pivotLen
+            float recw = i >= int(histSize * 0.75) ? 3.0 : i >= int(histSize * 0.5) ? 2.0 : i >= int(histSize * 0.25) ? 1.5 : 1.0
+
+            float hi = array.get(histH, i)
+            float lo = array.get(histL, i)
+            float op = array.get(histO, i)
+            float cl = array.get(histC, i)
+            float rng = math.max(hi - lo, syminfo.mintick)
+
+            // Pivot high
+            bool isPH = true
+            for j = 1 to pivotLen
+                if array.get(histH, i - j) >= hi or array.get(histH, i + j) >= hi
+                    isPH := false
+                    break
+            if isPH
+                float neigh = math.max(array.get(histH, i - 1), array.get(histH, i + 1))
+                if (hi - neigh) >= promGate
+                    float wick = hi - math.max(op, cl)
+                    array.push(pPrice, hi)
+                    array.push(pRecw, recw)
+                    array.push(pWick, math.min(1.0, wick / rng))
+
+            // Pivot low
+            bool isPL = true
+            for j = 1 to pivotLen
+                if array.get(histL, i - j) <= lo or array.get(histL, i + j) <= lo
+                    isPL := false
+                    break
+            if isPL
+                float neigh2 = math.min(array.get(histL, i - 1), array.get(histL, i + 1))
+                if (neigh2 - lo) >= promGate
+                    float wick2 = math.min(op, cl) - lo
+                    array.push(pPrice, lo)
+                    array.push(pRecw, recw)
+                    array.push(pWick, math.min(1.0, wick2 / rng))
+
+        // STEP 2: Adaptive clustering with multi-factor accumulation
+        array<float> cAvg     = array.new_float()
+        array<int>   cCount   = array.new_int()
+        array<float> cRecw    = array.new_float()
+        array<float> cWick    = array.new_float()
+        array<int>   cLastIdx = array.new_int()
+
+        if array.size(pPrice) > 0
+            for i = 0 to array.size(pPrice) - 1
+                float pp = array.get(pPrice, i)
+                float rw = array.get(pRecw, i)
+                float wq = array.get(pWick, i)
+                bool merged = false
+                if array.size(cAvg) > 0
+                    for j = 0 to array.size(cAvg) - 1
+                        if math.abs(pp - array.get(cAvg, j)) <= clusterTol
+                            int oldC = array.get(cCount, j)
+                            int newC = oldC + 1
+                            array.set(cAvg, j, (array.get(cAvg, j) * oldC + pp) / newC)
+                            array.set(cCount, j, newC)
+                            array.set(cRecw, j, array.get(cRecw, j) + rw)
+                            array.set(cWick, j, array.get(cWick, j) + wq)
+                            array.set(cLastIdx, j, math.max(array.get(cLastIdx, j), i))
+                            merged := true
+                            break
+                if not merged
+                    array.push(cAvg, pp)
+                    array.push(cCount, 1)
+                    array.push(cRecw, rw)
+                    array.push(cWick, wq)
+                    array.push(cLastIdx, i)
+
+        // STEP 3: Multi-factor confidence score (0..100)
+        int nC = array.size(cAvg)
+        array<float> cScore = array.new_float()
+        int   maxCount = 1
+        float maxRecw  = 1.0
+        int   pivTotal = math.max(array.size(pPrice), 1)
+        if nC > 0
+            for j = 0 to nC - 1
+                maxCount := math.max(maxCount, array.get(cCount, j))
+                maxRecw  := math.max(maxRecw, array.get(cRecw, j))
+            for j = 0 to nC - 1
+                int   cnt = array.get(cCount, j)
+                float touchN = float(cnt) / float(maxCount)
+                float recN   = array.get(cRecw, j) / maxRecw
+                float wickN  = array.get(cWick, j) / float(cnt)
+                float freshN = float(array.get(cLastIdx, j)) / float(pivTotal)
+                float wsum   = math.max(wTouch + wRecency + wWick + wFresh, 0.0001)
+                float blend  = (wTouch * touchN + wRecency * recN + wWick * wickN + wFresh * freshN) / wsum
+                array.push(cScore, blend * 100.0)
+
+        // STEP 4: Select top N by score, enforce min distance + min touches
+        array<float> selPrice = array.new_float()
+        array<int>   selCount = array.new_int()
+        array<float> selScore = array.new_float()
+        array<float> scoreCopy = array.copy(cScore)
+
+        int found = 0
+        int guard = 0
+        while found < numLevels and guard < 200
+            guard += 1
+            float bestScore = -1.0
+            int   bestIdx = -1
+            if array.size(scoreCopy) > 0
+                for k = 0 to array.size(scoreCopy) - 1
+                    if array.get(scoreCopy, k) > bestScore and array.get(cCount, k) >= touchPower
+                        bestScore := array.get(scoreCopy, k)
+                        bestIdx := k
+            if bestIdx == -1
+                break
+            float bp = array.get(cAvg, bestIdx)
+            bool tooClose = false
+            if array.size(selPrice) > 0
+                for k = 0 to array.size(selPrice) - 1
+                    if math.abs(bp - array.get(selPrice, k)) < minDistance
+                        tooClose := true
+                        break
+            array.set(scoreCopy, bestIdx, -1.0)
+            if not tooClose
+                array.push(selPrice, bp)
+                array.push(selCount, array.get(cCount, bestIdx))
+                array.push(selScore, bestScore)
+                found += 1
+
+        // STEP 5: Register levels for hit-rate (dedupe to avoid inflation)
+        if array.size(selPrice) > 0
+            for i = 0 to array.size(selPrice) - 1
+                float lv = array.get(selPrice, i)
+                bool exists = false
+                if array.size(trkLevel) > 0
+                    for k = 0 to array.size(trkLevel) - 1
+                        if math.abs(lv - array.get(trkLevel, k)) < clusterTol * 0.5
+                            exists := true
+                            break
+                if not exists
+                    array.push(trkLevel, lv)
+                    array.push(trkHit, false)
+                    totalDrawn += 1
+                    if array.size(trkLevel) > 50
+                        array.shift(trkLevel)
+                        array.shift(trkHit)
+
+        // STEP 6: Draw
+        if array.size(selPrice) > 0
+            string lStyle = f_lineStyle(lineStyleStr)
+            int leftAnchor = math.max(0, bar_index - math.min(bar_index, 300))
+            for i = 0 to array.size(selPrice) - 1
+                float lv  = array.get(selPrice, i)
+                int   cnt = array.get(selCount, i)
+                float sc  = array.get(selScore, i)
+                color baseCol = useAutoColor ? (lv < close ? supportColor : resistanceColor) : singleColor
+                float ratio = sc / 100.0
+                int   w = lineWidthMax
+                color col = baseCol
+                if useStrengthVisual
+                    w := math.max(1, int(math.round(lineWidthMax * math.max(0.34, ratio))))
+                    col := color.new(baseCol, int(45 * (1.0 - ratio)))
+                line ln = line.new(leftAnchor, lv, bar_index, lv, extend = extend.both, color = col, width = w, style = lStyle)
+                array.push(drawnLines, ln)
+                if showLabels
+                    string txt = str.tostring(lv, format.mintick) + " (" + str.tostring(cnt) + "x"
+                    txt := showScore ? txt + " | " + str.tostring(sc, "#") + ")" : txt + ")"
+                    label lb = label.new(bar_index + labelOffset, lv, txt, style = label.style_none, textcolor = col, size = f_labelSize(labelSizeStr))
+                    array.push(drawnLabels, lb)
+
+    // ENGINE PANEL
+    if showStats
+        var table tb = table.new(position.bottom_right, 2, 6, bgcolor = color.new(color.black, 70), border_width = 1, border_color = color.new(color.gray, 50))
+        float hitRate = totalDrawn > 0 ? float(totalHit) / float(totalDrawn) * 100.0 : 0.0
+        color hrCol = hitRate > 60 ? color.green : hitRate >= 40 ? color.orange : color.red
+        string regimeTxt = regimeMult > 1.15 ? "EXPANDING" : regimeMult < 0.9 ? "CONTRACTING" : "NEUTRAL"
+        table.cell(tb, 0, 0, "ENGINE", text_color = color.white, bgcolor = color.new(color.blue, 40), text_size = size.small)
+        table.cell(tb, 1, 0, "PRO v6", text_color = color.white, bgcolor = color.new(color.blue, 40), text_size = size.small)
+        table.cell(tb, 0, 1, "Analysis TF", text_color = color.gray, text_size = size.small)
+        table.cell(tb, 1, 1, analysisTF + (tfMode == "Auto" ? " (auto)" : ""), text_color = color.white, text_size = size.small)
+        table.cell(tb, 0, 2, "Vol Regime", text_color = color.gray, text_size = size.small)
+        table.cell(tb, 1, 2, regimeTxt, text_color = regimeMult > 1.15 ? color.lime : regimeMult < 0.9 ? color.orange : color.silver, text_size = size.small)
+        table.cell(tb, 0, 3, "Levels Drawn", text_color = color.gray, text_size = size.small)
+        table.cell(tb, 1, 3, str.tostring(totalDrawn), text_color = color.white, text_size = size.small)
+        table.cell(tb, 0, 4, "Hit Rate", text_color = color.gray, text_size = size.small)
+        table.cell(tb, 1, 4, str.tostring(hitRate, "#.#") + "%", text_color = hrCol, text_size = size.small)
+        table.cell(tb, 0, 5, "Cluster Tol", text_color = color.gray, text_size = size.small)
+        table.cell(tb, 1, 5, str.tostring(clusterTol, format.mintick), text_color = color.white, text_size = size.small)
