@@ -17,6 +17,7 @@ lineColor   = input.color(color.new(color.yellow, 0), "Line Color", group = "Vis
 lineWidth   = input.int(2, "Line Width", minval = 1, maxval = 5, group = "Visuals")
 lineStyle   = input.string("solid", "Line Style", options = ["solid", "dashed", "dotted"], group = "Visuals")
 showLabels  = input.bool(true, "Show Price Labels", group = "Visuals")
+showStats   = input.bool(true, "Show Hit Rate Panel", group = "Visuals", tooltip = "Show hit rate tracking panel")
 labelOffset = input.int(50, "Label Offset (bars right)", minval = 5, maxval = 200, group = "Visuals", tooltip = "How far to the right the price label sits from current bar")
 labelSize   = input.string("small", "Label Size", options = ["tiny", "small", "normal", "large"], group = "Visuals")
 
@@ -24,6 +25,15 @@ labelSize   = input.string("small", "Label Size", options = ["tiny", "small", "n
 
 var array<line>  drawnLines  = array.new_line()
 var array<label> drawnLabels = array.new_label()
+
+// --- Hit Rate Tracking State ---
+
+var array<float> historicalLevels = array.new_float()
+var array<bool>  levelHit         = array.new_bool()
+var array<int>   levelBar         = array.new_int()
+var int          totalLevelsDrawn = 0
+var int          totalLevelsHit   = 0
+var float        avgBounceCount   = 0.0
 
 // --- Helper ---
 
@@ -75,6 +85,19 @@ if tfBarChange
         array.shift(histC)
         array.shift(histO)
 
+// --- Hit Rate Tracking (runs every bar) ---
+
+if array.size(historicalLevels) > 0
+    float atrCheck = nz(tfAtr, 0.0)
+    if atrCheck > 0
+        float halfBin = atrCheck * 0.15 * 0.5
+        for i = 0 to array.size(historicalLevels) - 1
+            if not array.get(levelHit, i)
+                float lvl = array.get(historicalLevels, i)
+                if low <= lvl + halfBin and high >= lvl - halfBin
+                    array.set(levelHit, i, true)
+                    totalLevelsHit := totalLevelsHit + 1
+
 // --- Main Logic ---
 
 if barstate.islast
@@ -112,17 +135,20 @@ if barstate.islast
                 float barC = array.get(histC, i)
                 float barO = array.get(histO, i)
 
+                // Recency weighting
+                int weight = i >= int(histSize * 0.75) ? 3 : i >= int(histSize * 0.25) ? 2 : 1
+
                 // Support bounce: low touches bin, close above
                 int lowBin = math.max(0, math.min(numBins - 1, int((barL - rangeLow) / binSize)))
                 float lowBinTop = rangeLow + (lowBin + 1) * binSize
                 if barC > lowBinTop and barL <= lowBinTop
-                    array.set(bounceCounts, lowBin, array.get(bounceCounts, lowBin) + 1)
+                    array.set(bounceCounts, lowBin, array.get(bounceCounts, lowBin) + weight)
 
                 // Resistance bounce: high touches bin, close below
                 int highBin = math.max(0, math.min(numBins - 1, int((barH - rangeLow) / binSize)))
                 float highBinBot = rangeLow + highBin * binSize
                 if barC < highBinBot and barH >= highBinBot
-                    array.set(bounceCounts, highBin, array.get(bounceCounts, highBin) + 1)
+                    array.set(bounceCounts, highBin, array.get(bounceCounts, highBin) + weight)
 
             // Find top N levels
             float minDistPrice = atrVal * minDistance
@@ -158,6 +184,28 @@ if barstate.islast
 
             // Draw
             if array.size(levels) > 0
+                // Store levels for hit rate tracking
+                float bounceSum = 0.0
+                for i = 0 to array.size(levels) - 1
+                    float lvlPrice = array.get(levels, i)
+                    int   lvlCount = array.get(counts, i)
+                    bounceSum += lvlCount
+
+                    // Add to historical tracking arrays
+                    array.push(historicalLevels, lvlPrice)
+                    array.push(levelHit, false)
+                    array.push(levelBar, bar_index)
+                    totalLevelsDrawn := totalLevelsDrawn + 1
+
+                    // Cap arrays at 50 entries
+                    if array.size(historicalLevels) > 50
+                        // Check if oldest was hit before removing
+                        array.shift(historicalLevels)
+                        array.shift(levelHit)
+                        array.shift(levelBar)
+
+                avgBounceCount := bounceSum / array.size(levels)
+
                 for i = 0 to array.size(levels) - 1
                     float lvlPrice = array.get(levels, i)
                     int   lvlCount = array.get(counts, i)
@@ -168,3 +216,20 @@ if barstate.islast
                     if showLabels
                         label newLabel = label.new(bar_index + labelOffset, lvlPrice, str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlCount) + "x)", style = label.style_none, textcolor = lineColor, size = getLabelSize(labelSize))
                         array.push(drawnLabels, newLabel)
+
+    // --- Stats Table ---
+
+    if showStats
+        var table statsTable = table.new(position.bottom_right, 2, 4, bgcolor = color.new(color.black, 70), border_width = 1, border_color = color.new(color.gray, 50))
+
+        float hitRate = totalLevelsDrawn > 0 ? (float(totalLevelsHit) / float(totalLevelsDrawn)) * 100.0 : 0.0
+        color hitRateColor = hitRate > 60 ? color.green : hitRate >= 40 ? color.orange : color.red
+
+        table.cell(statsTable, 0, 0, "Levels Drawn", text_color = color.white, text_size = size.small)
+        table.cell(statsTable, 1, 0, str.tostring(totalLevelsDrawn), text_color = color.white, text_size = size.small)
+        table.cell(statsTable, 0, 1, "Levels Hit", text_color = color.white, text_size = size.small)
+        table.cell(statsTable, 1, 1, str.tostring(totalLevelsHit), text_color = color.white, text_size = size.small)
+        table.cell(statsTable, 0, 2, "Hit Rate", text_color = color.white, text_size = size.small)
+        table.cell(statsTable, 1, 2, str.tostring(hitRate, "#.#") + "%", text_color = hitRateColor, text_size = size.small)
+        table.cell(statsTable, 0, 3, "Avg Bounces", text_color = color.white, text_size = size.small)
+        table.cell(statsTable, 1, 3, str.tostring(avgBounceCount, "#.#"), text_color = color.white, text_size = size.small)
