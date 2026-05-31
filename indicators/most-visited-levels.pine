@@ -157,5 +157,5 @@ if barstate.islast
                     array.push(drawnLines, newLine)
 
                     if showLabels
-                        label newLabel = label.new(bar_index + 5, lvlPrice, str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlCount) + "x)", style = label.style_label_left, color = color.new(color.black, 60), textcolor = lineColor, size = size.small)
+                        label newLabel = label.new(bar_index + 50, lvlPrice, str.tostring(lvlPrice, format.mintick) + " (" + str.tostring(lvlCount) + "x)", style = label.style_none, textcolor = lineColor, size = size.small)
                         array.push(drawnLabels, newLabel)
