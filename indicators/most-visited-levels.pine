@@ -18,6 +18,7 @@ lookback    = input.int(500, "Lookback Bars", minval = 50, maxval = 5000, group 
 numBins     = input.int(100, "Price Resolution (bins)", minval = 20, maxval = 500, group = "Analysis")
 numLevels   = input.int(5, "Number of Levels", minval = 1, maxval = 10, group = "Analysis")
 minDistance  = input.float(0.5, "Min Distance Between Levels (ATR mult)", minval = 0.1, group = "Analysis")
+minTouches  = input.int(1, "Min Touch Count to Show Level", minval = 1, maxval = 30, group = "Analysis", tooltip = "Only show levels with at least this many touches")
 
 lineColor   = input.color(color.new(color.yellow, 0), "Line Color", group = "Visuals")
 lineWidth   = input.int(2, "Line Width", minval = 1, maxval = 5, group = "Visuals")
@@ -90,6 +91,10 @@ if barstate.islast
                     maxBin   := b
 
             if maxBin == -1 or maxCount == 0
+                break
+
+            // Skip if below minimum touch threshold
+            if maxCount < minTouches
                 break
 
             float levelPrice = rangeLow + (maxBin + 0.5) * binSize
